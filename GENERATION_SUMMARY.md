@@ -3,20 +3,12 @@
 **Workspace:** `/workspaces/codespaces-blank`
 **Project:** CashBI — independent Layer 1 Proof-of-Work cryptocurrency (native coin ticker BIC), EVM-compatible execution, decentralized P2P networking, TypeScript/Node.js.
 **Status:** Development build (NOT production-ready); all work committed locally, nothing pushed/deployed.
-**Total commits:** 11 on branch `main` (`7d5df5a` initial, `7fbff1f` generation summary, `e616c87` first audit fixes, `28c8544` first audit report, `255a1ae` generation summary regen, `2f5f2c7` second audit fixes, `b63e412` integration test, `86bf171` docs update, `5982907` process-leak test fix, `23b125d` docs sync, `f4e40b0` commit count correction)
-
-**Second audit complete:** The updated `do.md` calls for a deeper consensus and economic-security audit. This added:
-- 2 high-severity bug fixes (negative value and negative gasPrice value creation)
-- 1 critical CLI bug fix (parseArgs `values` not destructured — all CLI flags silently ignored)
-- 8 new regression tests (chain reorg consistency, invalid difficulty, modified headers, duplicate txs, rejected block state integrity, negative value, negative gasPrice, zero value boundary)
-- 1 automated two-node integration test (real processes, TCP P2P)
-- docs/testnet-two-nodes.md — reproducible two-node testnet procedure
-- Test count: 49 (up from 48 after second audit, 40 after first audit, 35 originally)
-- All checks pass: tests, typecheck, lint, npm audit
+**Total commits:** 12 on branch `main` (HEAD: `b29ea85`)
+**Working tree:** clean except `do.md` (modified externally by task handoff, uncommitted)
 
 ---
 
-## 1. Overview of what was generated
+## 1. Project Overview
 
 CashBI is a real blockchain implementation (not a token, dashboard, or mock) consisting of:
 
@@ -46,33 +38,41 @@ CashBI is a real blockchain implementation (not a token, dashboard, or mock) con
 
 ---
 
-## 2. Files created (cumulative)
+## 2. Files Created (Cumulative)
 
 ### Documentation
-- `README.md` — project overview, getting started, CLI/RPC, layout, doc map
-- `UNRESOLVED_DECISIONS.md` — D-1…D-21 open decisions with dev-default context
-- `AUDIT_REPORT.md` — adversarial technical audit report (per `do.md`), verified facts vs. assumptions, prioritized remaining risks
-- `docs/architecture.md` — data flow, consensus, storage, trust assumptions
-- `docs/networking.md` — P2P protocol, wire messages, discovery mechanisms, peer management
-- `docs/mining.md` — PoW algorithm, consent gate, resource limits, fork mining
-- `SECURITY.md` — threat model, known dev limitations, hard guards
-- `.gitignore` — node_modules, dist, data dirs, wallet.json, logs, `*.jsonl`
+| File | Purpose |
+|---|---|
+| `README.md` | project overview, getting started, CLI/RPC, layout, doc map |
+| `UNRESOLVED_DECISIONS.md` | D-1…D-21 open decisions with dev-default context |
+| `AUDIT_REPORT.md` | adversarial technical audit report (per `do.md`), verified facts vs. assumptions, prioritized remaining risks |
+| `GENERATION_SUMMARY.md` | this file — complete workspace record |
+| `docs/architecture.md` | data flow, consensus, storage, trust assumptions |
+| `docs/networking.md` | P2P protocol, wire messages, discovery mechanisms, peer management |
+| `docs/mining.md` | PoW algorithm, consent gate, resource limits, fork mining |
+| `docs/testnet-two-nodes.md` | reproducible two-node testnet procedure with observed results |
+| `SECURITY.md` | threat model, known dev limitations, hard guards |
+| `.gitignore` | node_modules, dist, data dirs, wallet.json, logs, `*.jsonl` |
 
-### Tooling config
-- `eslint.config.js` — ESLint 9 flat config (`typescript-eslint` recommended + custom rules)
+### Tooling Config
+| File | Purpose |
+|---|---|
+| `eslint.config.js` | ESLint 9 flat config (`typescript-eslint` recommended + custom rules) |
 
 ### Scripts
-- `scripts/smoke.ts` — end-to-end dev smoke script (crypto → tx → mempool → mine → block accept → balances correct)
+| File | Purpose |
+|---|---|
+| `scripts/smoke.ts` | end-to-end dev smoke script (crypto → tx → mempool → mine → block accept → balances correct) |
 
-### Pre-existing user files preserved (not touched)
+### Pre-existing User Files Preserved (Not Touched)
 - `do.md`, `do1.md` (original instructions/workspace rules)
 - `package.json`, `package-lock.json`, `tsconfig.json`
 
 ---
 
-## 3. Audit fixes applied (cumulative)
+## 3. Audit Fixes Applied (Cumulative)
 
-### First audit fixes (per original `do.md` priorities 1–9)
+### First Audit Fixes (per original `do.md` priorities 1–9)
 
 | Severity | File | Issue | Fix |
 |---|---|---|---|
@@ -84,7 +84,7 @@ CashBI is a real blockchain implementation (not a token, dashboard, or mock) con
 | Low | `src/vm/evm.ts` | `pop()` had misleading absolute-value code | Removed |
 | Low | `src/cli/index.ts` | `keygen` printed private key to stdout | Removed; only address shown |
 
-### Second audit fixes (per updated `do.md` — consensus and economic-security)
+### Second Audit Fixes (per updated `do.md` — consensus and economic-security)
 
 | Severity | File | Issue | Fix |
 |---|---|---|---|
@@ -93,9 +93,9 @@ CashBI is a real blockchain implementation (not a token, dashboard, or mock) con
 | Critical | `src/cli/index.ts` | `parseStartOptions()` didn't destructure `parsed.values` from `parseArgs()` — all CLI flags (`--allow-mining`, `--coinbase`, `--port`, etc.) silently ignored | Destructure `{ values: parsed }` from `parseArgs()` result |
 | Medium | `test/integration-two-nodes.test.ts` | `stopNode()` calls inside `try` block — child processes could leak on assertion failure | Moved `stopNode()` calls into `finally` block |
 
-### Regression tests added (cumulative)
+### Regression Tests Added (Cumulative)
 
-#### First audit
+**First audit:**
 - `chain: acceptBlock rejects block with invalid tx without crashing`
 - `chain: block reward does not push total supply over MAX_TOTAL_SUPPLY`
 - `chain: persistence skips corrupt trailing ledger lines`
@@ -103,7 +103,7 @@ CashBI is a real blockchain implementation (not a token, dashboard, or mock) con
 - `crypto: fromHex rejects odd-length hex`
 - `crypto: odd-length hex address is invalid`
 
-#### Second audit
+**Second audit:**
 - `chain: invalid difficulty change is rejected`
 - `chain: modified header (wrong stateRoot) is rejected`
 - `chain: duplicate transactions in a block are rejected`
@@ -113,24 +113,25 @@ CashBI is a real blockchain implementation (not a token, dashboard, or mock) con
 - `tx: negative gasPrice is rejected by validateTransaction`
 - `tx: zero value is allowed`
 
-#### Integration test (new file)
+**Integration test (new file):**
 - `test/integration-two-nodes.test.ts` — two real node processes, TCP P2P, tx propagation, block convergence, restart recovery, mismatched genesis rejection
 
-**Test count: 49 (was 35 originally, 40 after first audit, 48 after second audit).**
+**Test count: 49** (was 35 originally, 40 after first audit, 48 after second audit).
 
 ---
 
-## 4. Verification results
+## 4. Verification Results (All Executed)
 
-| Check | Result |
-|---|---|
-| `npm test` (49 tests) | **49 pass, 0 fail** |
-| `npx tsc -p tsconfig.json --noEmit` | clean (0 errors) |
-| `npm run security:check` | clean (`npm audit`: 0 vulnerabilities; eslint: 0 errors/warnings; typecheck: clean) |
-| `scripts/smoke.ts` | end-to-end pass (crypto → tx → mempool → mine → block accept → balances correct) |
-| `test/integration-two-nodes.test.ts` | real two-node runtime test pass (~5.6s); process-leak defect fixed |
+| Check | Command | Result | Exit Code |
+|---|---|---|---|
+| Unit + integration tests | `npm test` | **49 pass, 0 fail** (~14s) | 0 |
+| TypeScript typecheck | `npx tsc -p tsconfig.json --noEmit` | clean (0 errors) | 0 |
+| Lint | `npm run lint` | 0 errors, 0 warnings | 0 |
+| Security audit | `npm run security:check` | 0 vulnerabilities; audit + lint + typecheck all pass | 0 |
+| Smoke script | `node --import tsx scripts/smoke.ts` | end-to-end pass (balances correct) | 0 |
+| Integration test | `node --import tsx --test test/integration-two-nodes.test.ts` | real two-node runtime test pass (~5.6s) | 0 |
 
-Notable passing tests:
+### Notable Passing Tests
 - `chain: ledger persistence roundtrip`
 - `chain: mempool drops included transactions after block acceptance`
 - `chain: fork & reorg — deeper fork replaces the tip`
@@ -154,43 +155,63 @@ Notable passing tests:
 
 ## 5. Git
 
-- `git init` run in `/workspaces/codespaces-blank`
-- Branch `main`, 11 commits:
-  - `7d5df5a` — CashBI initial commit: Layer 1 PoW blockchain (BIC)
-  - `7fbff1f` — docs: add generation summary of all generated project files
-  - `e616c87` — audit: fix confirmed bugs and add regression tests
-  - `28c8544` — docs: add adversarial technical audit report
-  - `255a1ae` — docs: regenerate generation summary with complete workspace record
-  - `2f5f2c7` — second audit: consensus and economic-security fixes
-  - `b63e412` — integration: add real two-node testnet integration test
-  - `86bf171` — docs: update audit report and generation summary with integration test defect fix
-  - `5982907` — test: fix process leak in integration test on assertion failure
-  - `23b125d` — docs: sync audit report and generation summary with actual repo state
-  - `f4e40b0` — docs: correct commit count to 10 with accurate SHAs
-- Working tree clean (except `do.md`, which was modified by the system as part of task handoff)
-- **No remote configured, nothing pushed** (per user instruction)
+| Item | Detail |
+|---|---|
+| `git init` | run in `/workspaces/codespaces-blank` |
+| Branch | `main` |
+| Total commits | **12** |
+| Working tree | clean except `do.md` (modified externally by task handoff) |
+| Remote | none configured — **nothing pushed** (per user instruction) |
+
+**Commit History (most recent first):**
+| SHA | Message |
+|---|---|
+| `b29ea85` | docs: update commit count to 11 with accurate SHAs |
+| `f4e40b0` | docs: correct commit count to 10 with accurate SHAs |
+| `23b125d` | docs: sync audit report and generation summary with actual repo state |
+| `5982907` | test: fix process leak in integration test on assertion failure |
+| `86bf171` | docs: update audit report and generation summary with integration test defect fix |
+| `b63e412` | integration: add real two-node testnet integration test |
+| `2f5f2c7` | second audit: consensus and economic-security fixes |
+| `255a1ae` | docs: regenerate generation summary with complete workspace record |
+| `28c8544` | docs: add adversarial technical audit report |
+| `e616c87` | audit: fix confirmed bugs and add regression tests |
+| `7fbff1f` | docs: add generation summary of all generated project files |
+| `7d5df5a` | CashBI initial commit: Layer 1 PoW blockchain (BIC) |
 
 ---
 
-## 6. Design decisions recorded
+## 6. Design Decisions Recorded
 
-All permanent consensus parameters are explicitly **unresolved**; `src/config/params.ts` holds dev defaults only, labeled D-1…D-21 and tracked in `UNRESOLVED_DECISIONS.md`. Key dev defaults:
+All permanent consensus parameters are explicitly **unresolved**; `src/config/params.ts` holds dev-defaults only, labeled D-1…D-21 and tracked in `UNRESOLVED_DECISIONS.md`.
 
-- Max supply: 100,000,000 BIC (D-1 open)
-- Decimals: 18 (D-2 open)
-- Chain id: 901291 (D-3 open)
-- Block reward: 2 BIC (D-1/D-8 open)
-- Difficulty: 1, retarget every 60 blocks, clamp ×1/4…×4 (D-5…D-8 open)
-- Target block time: 1s (D-7 open)
-- State root: keccak of JSON serialization, NOT an MPT (D-14 open)
-- EVM: miniEVM subset (D-15 open)
-- Storage: JSONL ledger (D-18 open)
-- Mining: explicit consent gate + keccak/sec throttle (D-19 open)
-- No hardcoded peer IPs anywhere in `src/` (enforced by `test/security.test.ts`)
+| Decision | Dev Default | Status |
+|---|---|---|
+| D-1 Max supply / issuance | 100,000,000 BIC cap; 2 BIC/block flat reward | Open |
+| D-2 Decimals | 18 | Open |
+| D-3 Chain id | 901291 | Open |
+| D-4 Genesis specification | emptyGenesisConfig (no allocations) | Open |
+| D-5 Difficulty retarget | bounded linear, ×1/4…×4 per retarget, every 60 blocks | Open |
+| D-6 Genesis difficulty | 1 | Open |
+| D-7 Target block time | 1 second | Open |
+| D-8 Difficulty floor/ceiling | MIN=1, MAX=2^32−1 | Open |
+| D-9 Gas schedule | 21000 transfer / 53000 create; flat opcode costs | Open |
+| D-10 Block gas limit | 30,000,000 | Open |
+| D-11 Protocol / network version | "cashbi/0.1", networkVersion 1 | Open |
+| D-12 Default ports | P2P 30303, RPC 8545 | Open |
+| D-13 Peer / frame limits | MAX_PEERS=32, MAX_PENDING=96, frame=8MiB | Open |
+| D-14 State commitment | keccak of JSON serialization (not MPT) | Open |
+| D-15 EVM coverage | miniEVM subset (no CALL/CREATE/logs/precompiles) | Open |
+| D-16 Fork retention | 512 blocks | Open |
+| D-17 Canonical encoding | RLP for blocks/txs; JSON for RPC/ledger | Open |
+| D-18 Storage engine | append-only JSONL ledger | Open |
+| D-19 Mining governance | explicit consent + keccak/sec throttle (512 H/s default) | Open |
+| D-20 Seed infrastructure | DNS seeds / HTTPS endpoints intentionally empty | Open |
+| D-21 Security posture | no audit performed; keyfiles unencrypted | Ongoing |
 
 ---
 
-## 7. Directory tree (project files only)
+## 7. Directory Tree (Project Files Only)
 
 ```
 /workspaces/codespaces-blank/
@@ -243,7 +264,7 @@ All permanent consensus parameters are explicitly **unresolved**; `src/config/pa
 
 ---
 
-## 8. What was NOT done (per instructions)
+## 8. What Was NOT Done (Per Instructions)
 
 - No `git push` / no remote configured.
 - No deploy or publish.
@@ -251,3 +272,41 @@ All permanent consensus parameters are explicitly **unresolved**; `src/config/pa
 - Nothing outside `/workspaces/codespaces-blank` was created or modified.
 - No existing user files (`do.md`, `do1.md`) were deleted or overwritten.
 - Not claimed production-ready; no formal security audit performed.
+
+---
+
+## 9. Two-Node Integration Test (Summary)
+
+`test/integration-two-nodes.test.ts` — automated test using **two real `tsx` node processes** with actual TCP P2P connectivity. All steps verified:
+
+| Step | Result |
+|---|---|
+| Node A start (miner, consented) | Pass — `chainId=901291`, genesis hash matches, mining enabled |
+| Node B start (sync, connects to A) | Pass — same chainId/genesis, tip=0, `--peers 127.0.0.1:30401` |
+| P2P TCP connection + handshake | Pass — `net_peerCount = 1` on both nodes |
+| Genesis/chainId match | Pass — both report identical genesis hash |
+| Tx submission to node A | Pass — `bic_sendRawTransaction` returns tx hash |
+| Balance propagation to node B | Pass — recipient balance identical on both nodes |
+| Block convergence (same full hash) | Pass — both nodes converge on same tip number and block hash |
+| Node B restart recovery | Pass — recovers tip from `blocks.jsonl`, reconnects to node A |
+| Mismatched genesis rejection | Pass — exit code 1, "stored genesis hash mismatch" |
+
+See `docs/testnet-two-nodes.md` for the full reproducible procedure.
+
+---
+
+## 10. Remaining Risks (Prioritized)
+
+| Priority | Risk | Decision Ref |
+|---|---|---|
+| 1 | No formal security audit; do not run on value-bearing network | D-21 |
+| 2 | State root is JSON keccak, not MPT — no light-client proofs | D-14 |
+| 3 | EVM coverage is miniEVM subset — missing CALL/CREATE/logs/precompiles | D-15 |
+| 4 | Storage is JSONL only — no pruning, no embedded engine | D-18 |
+| 5 | Keyfiles stored unencrypted | D-21 |
+| 6 | P2P transport has no TLS | D-21 |
+| 7 | Max supply / issuance / chain id / genesis all unresolved | D-1…D-8 |
+| 8 | Difficulty retarget algorithm is dev default | D-5 |
+| 9 | Mempool has no per-sender sub-limit (DoS vector) | D-13 |
+| 10 | P2P frame limit allows up to ~256 MiB buffered across 32 peers | D-13 |
+| 11 | Transactions from losing forks not returned to mempool after reorg | Dev limitation |
