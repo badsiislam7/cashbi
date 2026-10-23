@@ -232,11 +232,10 @@ test("integration: two real nodes sync, propagate tx, mine block, restart recove
       assert.equal(exitCode, 1, "mismatched genesis should cause exit code 1");
     } finally {
       rmSync(dirC, { recursive: true, force: true });
+      // Always stop child processes, even if an assertion failed earlier.
+      await stopNode(nodeB2).catch(() => {});
+      await stopNode(nodeA).catch(() => {});
     }
-
-    // Cleanup
-    await stopNode(nodeB2);
-    await stopNode(nodeA);
   } finally {
     rmSync(dirA, { recursive: true, force: true });
     rmSync(dirB, { recursive: true, force: true });
