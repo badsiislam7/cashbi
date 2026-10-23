@@ -3,7 +3,7 @@
 **Workspace:** `/workspaces/codespaces-blank`
 **Project:** CashBI — independent Layer 1 Proof-of-Work cryptocurrency (native coin ticker BIC), EVM-compatible execution, decentralized P2P networking, TypeScript/Node.js.
 **Status:** Development build (NOT production-ready); all work committed locally, nothing pushed/deployed.
-**Total commits:** 20 on branch `main` (HEAD: `edf5d77`)
+**Total commits:** 21 on branch `main` (HEAD: `1ada1bf`)
 **Working tree:** clean except `do.md` (modified externally by task handoff, uncommitted)
 
 ---
@@ -166,6 +166,7 @@ CashBI is a real blockchain implementation (not a token, dashboard, or mock) con
 **Commit History (most recent first):**
 | SHA | Message |
 |---|---|
+| `1ada1bf` | docs: correct commit count to 20 with accurate HEAD SHA |
 | `edf5d77` | docs: correct commit count to 19 with accurate HEAD SHA |
 | `2b2c66a` | docs: correct commit count to 18 with accurate HEAD SHA |
 | `e664f15` | docs: correct commit count to 17 with accurate HEAD SHA |
