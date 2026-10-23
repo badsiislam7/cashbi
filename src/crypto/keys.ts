@@ -63,7 +63,12 @@ export function addressFromPrivateKey(priv: Uint8Array): string {
 }
 
 export function isValidAddress(addr: string): boolean {
-  return isHex(addr) && fromHex(addr).length === 20;
+  if (!isHex(addr)) return false;
+  try {
+    return fromHex(addr).length === 20;
+  } catch {
+    return false;
+  }
 }
 
 function pad32(bytes: Uint8Array): Uint8Array {

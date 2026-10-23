@@ -85,6 +85,7 @@ export class FullNode {
     const genesis = genesisConfigOverride ?? this.genesisFromConfig(config);
     this.chain = this.loadChain(config.dataDir, genesis);
     this.mempool = new Mempool();
+    this.mempool.setChainId(this.chain.chainId);
     this.chain.mempoolRef = this.mempool;
     this.p2p = new P2PServer({
       chainId: genesis.chainId,

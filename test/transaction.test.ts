@@ -99,3 +99,28 @@ test("mempool: duplicate rejection, wallet checks, fee sorting, future nonce win
   const ordered = pool.snapshot();
   assert.equal(ordered[0].gasPrice > ordered[1].gasPrice, true);
 });
+
+test("mempool: stats pendingSenders counts unique senders, not tx hashes", () => {
+  const alice = randomAccount();
+  const bob = randomAccount();
+  const rich = fundedState([{ address: alice.address, balance: 10n ** 18n }, { address: bob.address, balance: 10n ** 18n }]);
+  const pool = new Mempool();
+  pool.setChainId(DEV_CHAIN_ID);
+  const tx1 = signTransaction(
+    { nonce: 0n, to: bob.address, value: 1n, data: new Uint8Array(0), gasPrice: 3n, gas: 21_000n, chainId: DEV_CHAIN_ID },
+    alice.privateKey,
+  );
+  const tx2 = signTransaction(
+    { nonce: 1n, to: bob.address, value: 1n, data: new Uint8Array(0), gasPrice: 2n, gas: 21_000n, chainId: DEV_CHAIN_ID },
+    alice.privateKey,
+  );
+  const tx3 = signTransaction(
+    { nonce: 0n, to: alice.address, value: 1n, data: new Uint8Array(0), gasPrice: 1n, gas: 21_000n, chainId: DEV_CHAIN_ID },
+    bob.privateKey,
+  );
+  pool.add(tx1, { chainId: DEV_CHAIN_ID, state: rich });
+  pool.add(tx2, { chainId: DEV_CHAIN_ID, state: rich });
+  pool.add(tx3, { chainId: DEV_CHAIN_ID, state: rich });
+  assert.equal(pool.stats().size, 3);
+  assert.equal(pool.stats().pendingSenders, 2, "two unique senders: alice and bob");
+});

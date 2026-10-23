@@ -70,5 +70,16 @@ test("keys: address validation strictness", () => {
   assert.equal(isValidAddress("0x" + "11".repeat(20)), true);
   assert.equal(isValidAddress("0x" + "11".repeat(19)), false);
   assert.equal(isValidAddress("双十一"), false);
+  // Odd-length hex address should be invalid (fromHex no longer silently pads)
+  assert.equal(isValidAddress("0x" + "11".repeat(19) + "1"), false);
   void fromHex;
+});
+
+test("util: fromHex rejects odd-length hex instead of silently padding", () => {
+  assert.throws(() => fromHex("0x1"), /odd-length/);
+  assert.throws(() => fromHex("0xabc"), /odd-length/);
+  assert.throws(() => fromHex("1"), /odd-length/);
+  // Even-length hex still works
+  assert.equal(fromHex("0x00").length, 1);
+  assert.equal(fromHex("0x0001").length, 2);
 });

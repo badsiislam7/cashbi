@@ -9,8 +9,8 @@ export function toHex(bytes: Uint8Array): string {
 }
 
 export function fromHex(hex: string): Uint8Array {
-  let h = stripZeroHex(hex);
-  if (h.length % 2 !== 0) h = "0" + h;
+  const h = stripZeroHex(hex);
+  if (h.length % 2 !== 0) throw new Error(`odd-length hex string: ${hex}`);
   if (!/^[0-9a-f]*$/.test(h)) throw new Error(`invalid hex: ${hex}`);
   const buf = Buffer.from(h, "hex");
   return buf.length === 0 ? new Uint8Array(0) : new Uint8Array(buf);

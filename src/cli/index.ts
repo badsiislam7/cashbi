@@ -91,7 +91,7 @@ async function commandKeygen(rest: string[]): Promise<void> {
   const keyfile = makeKeyfile();
   if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
   writeFileSync(walletPath, JSON.stringify(keyfile, null, 2), { mode: 0o600 });
-  stdout.write(`address: ${keyfile.address}\nprivate key: 0x${keyfile.privateKey.replace(/^0x/, "")}\n`);
+  stdout.write(`address: ${keyfile.address}\n`);
   stdout.write(`written to ${walletPath} (owner-only permissions) — keep it safe\n`);
 }
 

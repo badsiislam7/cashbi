@@ -9,6 +9,7 @@ import {
   sortTransactions,
   txHash,
   validateTransaction,
+  recoverTransactionSender,
   type Transaction,
 } from "./transaction.js";
 import type { WorldState } from "../state/world.js";
@@ -29,6 +30,12 @@ export class Mempool {
   private readonly byHash = new Map<string, Transaction>();
   private ready: Transaction[] | null = null; // lazily-built sorted snapshot
   private stop = false;
+  private chainId: number | null = null;
+
+  /** Records the chain id used for sender recovery in stats(). */
+  setChainId(chainId: number): void {
+    this.chainId = chainId;
+  }
 
   close(): void {
     this.stop = true;
@@ -91,7 +98,14 @@ export class Mempool {
 
   stats(): MempoolStats {
     const senders = new Set<string>();
-    for (const tx of this.byHash.values()) senders.add(txHash(tx));
+    const effectiveChainId = this.chainId ?? 0;
+    for (const tx of this.byHash.values()) {
+      try {
+        senders.add(recoverTransactionSender(tx, effectiveChainId));
+      } catch {
+        senders.add(txHash(tx));
+      }
+    }
     return { size: this.byHash.size, pendingSenders: senders.size };
   }
 

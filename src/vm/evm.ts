@@ -358,8 +358,7 @@ export class EVM {
 
   private pop(): bigint {
     if (this.stack.length === 0) throw new Error("stack underflow");
-    const value = this.stack.pop()!;
-    return value < 0n ? -value : value;
+    return this.stack.pop()!;
   }
 
   private binaryOp(op: OpCode, a: bigint, b: bigint): bigint {

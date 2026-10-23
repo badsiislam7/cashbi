@@ -1,15 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isMiningCandidate } from "../src/consensus/pow.js";
-import { BIC, DEV_CHAIN_ID, BLOCK_REWARD } from "../src/config/params.js";
+import { BIC, DEV_CHAIN_ID, BLOCK_REWARD, MAX_TOTAL_SUPPLY } from "../src/config/params.js";
 import { Blockchain } from "../src/chain/blockchain.js";
 import { buildBlockForMining, buildBlockOn } from "../src/mining/candidate.js";
 import { emptyGenesisConfig } from "../src/chain/genesis.js";
 import { blockHash, decodeBlock } from "../src/chain/block.js";
-import { randomAccount, signTransaction, txHash } from "../src/tx/transaction.js";
+import { randomAccount, signTransaction } from "../src/tx/transaction.js";
 import { Mempool } from "../src/tx/mempool.js";
 import { readLedger } from "../src/chain/persist.js";
 
@@ -214,6 +214,27 @@ test("chain: ledger persistence roundtrip", () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("chain: persistence skips corrupt trailing ledger lines", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cashbi-ledger-corrupt-"));
+  const ledgerPath = join(dir, "blocks.jsonl");
+  const { chain, mempool, miner } = fundedChain();
+  chain.enablePersistence(ledgerPath);
+  const receipt = mineAndSubmit(chain, mempool, miner.address, Math.floor(1_700_000_000) + 5);
+  assert.equal(receipt.accepted, true);
+
+  // Append a corrupt trailing line to simulate a torn write.
+  appendFileSync(ledgerPath, "not valid jsonl\n");
+  appendFileSync(ledgerPath, "{b64: not-base64}\n");
+
+  const records = readLedger(ledgerPath);
+  // readLedger stops scanning at the first corrupt line; valid lines before it
+  // should still be readable.
+  assert.equal(records.length >= 1, true);
+  const ledgerReloaded = decodeBlock(records[records.length - 1]);
+  assert.equal(blockHash(ledgerReloaded.header), blockHash(chain.tip.block.header));
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("chain: mempool drops included transactions after block acceptance", () => {
   const { chain, mempool, user, miner } = fundedChain();
   const payee = randomAccount();
@@ -226,5 +247,83 @@ test("chain: mempool drops included transactions after block acceptance", () => 
   const receipt = mineAndSubmit(chain, mempool, miner.address, Math.floor(1_700_000_000) + 5);
   assert.equal(receipt.accepted, true);
   assert.equal(mempool.stats().size, 0);
-  void txHash;
+});
+
+test("chain: acceptBlock rejects block with invalid tx without crashing", () => {
+  const { chain, mempool, user, miner } = fundedChain();
+  const payee = randomAccount();
+  // Tx with nonce 5 but account is at nonce 0 — execution must reject the block,
+  // not throw an uncaught exception that crashes the node.
+  const badTx = signTransaction(
+    { nonce: 5n, to: payee.address, value: 1n, data: new Uint8Array(0), gasPrice: 1n, gas: 21_000n, chainId: DEV_CHAIN_ID },
+    user.privateKey,
+  );
+  const template = buildBlockForMining({
+    chain,
+    mempool,
+    coinbase: miner.address,
+    timestamp: Math.floor(1_700_000_000) + 5,
+    activeReward: BLOCK_REWARD,
+    extraData: new TextEncoder().encode("bad-tx"),
+  })!;
+  // Force the bad tx into the template by direct construction (bypasses mempool).
+  const block = {
+    header: { ...template.header },
+    transactions: [...template.transactions, badTx],
+  };
+  // Mine a nonce for the modified block header.
+  const mined = findNonce(block);
+  let threw = false;
+  try {
+    const receipt = chain.acceptBlock(mined);
+    assert.equal(receipt.accepted, false, "block with invalid tx should be rejected");
+  } catch {
+    threw = true;
+  }
+  assert.equal(threw, false, "acceptBlock must not throw on invalid tx in block");
+});
+
+test("chain: block reward does not push total supply over MAX_TOTAL_SUPPLY", () => {
+  const { mempool, miner } = fundedChain();
+  const MAX = MAX_TOTAL_SUPPLY;
+  // Set the chain's total supply right at the cap by directly manipulating
+  // the genesis state through a block that pushes supply to MAX.
+  // Simpler: verify that acceptBlock rejects when supply would exceed cap.
+  // We construct a state at the cap and mine on it.
+
+  // Create a chain where supply is at MAX by mining blocks with reward until
+  // we're close, then verify the next block is rejected.
+  // Since BLOCK_REWARD = 2 BIC and MAX = 100M BIC, we can't mine that many.
+  // Instead, directly test: allocate nearly all supply to a single account.
+  const bigGenesis = emptyGenesisConfig(Math.floor(1_700_000_000));
+  bigGenesis.allocations = [{ address: miner.address, balance: MAX - BLOCK_REWARD }];
+  const bigChain = new Blockchain(bigGenesis);
+  assert.equal(bigChain.tipState.totalSupply(), MAX - BLOCK_REWARD);
+
+  const template = buildBlockForMining({
+    chain: bigChain,
+    mempool,
+    coinbase: miner.address,
+    timestamp: Math.floor(1_700_000_000) + 5,
+    activeReward: BLOCK_REWARD,
+    extraData: new TextEncoder().encode("supply-cap"),
+  })!;
+  const mined = findNonce(template);
+  const receipt = bigChain.acceptBlock(mined);
+  assert.equal(receipt.accepted, true, "block at exactly cap should be accepted");
+  assert.equal(bigChain.tipState.totalSupply(), MAX);
+
+  // Now try another block — reward would push over cap.
+  const template2 = buildBlockForMining({
+    chain: bigChain,
+    mempool,
+    coinbase: miner.address,
+    timestamp: Math.floor(1_700_000_000) + 10,
+    activeReward: BLOCK_REWARD,
+    extraData: new TextEncoder().encode("supply-over"),
+  })!;
+  const mined2 = findNonce(template2);
+  const receipt2 = bigChain.acceptBlock(mined2);
+  assert.equal(receipt2.accepted, false, "block exceeding cap should be rejected");
+  assert.match(receipt2.reason ?? "", /supply/);
 });

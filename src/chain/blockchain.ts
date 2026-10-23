@@ -205,9 +205,14 @@ export class Blockchain {
     const receipts: TxExecutionReceipt[] = [];
     let gasUsedTotal = 0n;
     for (const tx of block.transactions) {
-      const receipt = this.execute(state, tx, ctx);
-      receipts.push(receipt);
-      gasUsedTotal += receipt.gasUsed;
+      try {
+        const receipt = this.execute(state, tx, ctx);
+        receipts.push(receipt);
+        gasUsedTotal += receipt.gasUsed;
+      } catch (err) {
+        // A single invalid tx must reject the block, not crash the node.
+        return reject(`tx execution failed: ${(err as Error).message}`);
+      }
     }
     if (!block.transactions.length && gasUsedTotal !== 0n) {
       // unreachable, defensive
@@ -219,12 +224,14 @@ export class Blockchain {
 
     // Block reward (dev issuance, decision D-1 open) + supply cap.
     if (BLOCK_REWARD > 0n) {
+      // state.totalSupply() reads the backing state, not the journal overlay
+      // where the reward is staged, so check against cap explicitly.
+      if (state.totalSupply() + BLOCK_REWARD > MAX_TOTAL_SUPPLY) {
+        return reject("max total supply would be exceeded");
+      }
       const journal = new Journal(state);
       const cb = journal.ensureAccount(block.header.coinbase);
       cb.balance += BLOCK_REWARD;
-      if (state.totalSupply() > MAX_TOTAL_SUPPLY) {
-        return reject("max total supply would be exceeded");
-      }
       journal.applyTo(state);
     } else if (state.totalSupply() > MAX_TOTAL_SUPPLY) {
       return reject("max total supply exceeded");
