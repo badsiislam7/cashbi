@@ -3,7 +3,7 @@
 **Workspace:** `/workspaces/codespaces-blank`
 **Project:** CashBI — independent Layer 1 Proof-of-Work cryptocurrency (native coin ticker BIC), EVM-compatible execution, decentralized P2P networking, TypeScript/Node.js.
 **Status:** Development build (NOT production-ready); all work committed locally, nothing pushed/deployed.
-**Total commits:** 5 on branch `main` (`7d5df5a` initial, `e616c87` first audit fixes, `28c8544` first audit report, `255a1ae` generation summary regen, `2f5f2c7` second audit fixes)
+**Total commits:** 6 on branch `main` (`7d5df5a` initial, `e616c87` first audit fixes, `28c8544` first audit report, `255a1ae` generation summary regen, `2f5f2c7` second audit fixes)
 
 **Second audit complete:** The updated `do.md` calls for a deeper consensus and economic-security audit. This added:
 - 2 high-severity bug fixes (negative value and negative gasPrice value creation)
@@ -91,6 +91,7 @@ CashBI is a real blockchain implementation (not a token, dashboard, or mock) con
 | High | `src/tx/transaction.ts` | `validateTransaction()` didn't check `tx.value >= 0` — negative value mints value | Added `if (tx.value < 0n) throw new Error("value must be non-negative")` |
 | High | `src/tx/transaction.ts` | `validateTransaction()` didn't check `tx.gasPrice >= 0n` — negative gasPrice mints value | Added `if (tx.gasPrice < 0n) throw new Error("gasPrice must be non-negative")` |
 | Critical | `src/cli/index.ts` | `parseStartOptions()` didn't destructure `parsed.values` from `parseArgs()` — all CLI flags (`--allow-mining`, `--coinbase`, `--port`, etc.) silently ignored | Destructure `{ values: parsed }` from `parseArgs()` result |
+| Medium | `test/integration-two-nodes.test.ts` | `stopNode()` calls inside `try` block — child processes could leak on assertion failure | Moved `stopNode()` calls into `finally` block |
 
 ### Regression tests added (cumulative)
 
@@ -127,7 +128,7 @@ CashBI is a real blockchain implementation (not a token, dashboard, or mock) con
 | `npx tsc -p tsconfig.json --noEmit` | clean (0 errors) |
 | `npm run security:check` | clean (`npm audit`: 0 vulnerabilities; eslint: 0 errors/warnings; typecheck: clean) |
 | `scripts/smoke.ts` | end-to-end pass (crypto → tx → mempool → mine → block accept → balances correct) |
-| `test/integration-two-nodes.test.ts` | real two-node runtime test pass (~5.6s) |
+| `test/integration-two-nodes.test.ts` | real two-node runtime test pass (~5.6s); process-leak defect fixed |
 
 Notable passing tests:
 - `chain: ledger persistence roundtrip`
@@ -154,12 +155,14 @@ Notable passing tests:
 ## 5. Git
 
 - `git init` run in `/workspaces/codespaces-blank`
-- Branch `main`, 5 commits:
+- Branch `main`, 6 commits:
   - `7d5df5a` — CashBI initial commit: Layer 1 PoW blockchain (BIC)
   - `e616c87` — first audit: fix confirmed bugs and add regression tests
   - `28c8544` — docs: add adversarial technical audit report
   - `255a1ae` — docs: regenerate generation summary with complete workspace record
   - `2f5f2c7` — second audit: consensus and economic-security fixes
+  - `b63e412` — integration: add real two-node testnet integration test
+  - `b63e412` — integration: add real two-node testnet integration test
 - Working tree clean
 - **No remote configured, nothing pushed** (per user instruction)
 

@@ -3,13 +3,13 @@
 **Workspace:** `/workspaces/codespaces-blank`
 **Date:** 2026-10-23
 **Audit scope:** Two rounds of adversarial review per `do.md` priorities (first audit: priorities 1–9; second audit: deeper consensus and economic-security audit per updated `do.md`).
-**Result:** 9 confirmed bugs fixed, 12 regression tests added, all 48 tests passing, all checks clean.
+**Result:** 10 confirmed bugs fixed, 12 regression tests added, 1 integration test defect fixed, all 49 tests passing, all checks clean.
 
 ---
 
 ## Executive Summary
 
-Two rounds of adversarial audits have been performed on the CashBI codebase. The implementation is structurally sound for a development build, with PoW validation, fork choice, EIP-155 signing, mempool, P2P transport, and consensus-gated mining all implemented and tested. **9 confirmed bugs** were identified and fixed (2 critical, 1 high, 1 medium, 5 low), and **12 regression tests** were added to prevent recurrence. All 48 tests pass; typecheck, lint, and `npm audit` are clean.
+Two rounds of adversarial audits have been performed on the CashBI codebase. The implementation is structurally sound for a development build, with PoW validation, fork choice, EIP-155 signing, mempool, P2P transport, and consensus-gated mining all implemented and tested. **10 confirmed bugs** were identified and fixed (3 critical, 2 high, 1 medium, 4 low), and **12 regression tests** were added to prevent recurrence. A process-leak defect in the integration test was also identified and fixed. All 49 tests pass; typecheck, lint, and `npm audit` are clean.
 
 **Production-readiness claim: NOT justified.** No formal audit has been performed; multiple permanent consensus parameters remain unresolved (see `UNRESOLVED_DECISIONS.md`).
 
@@ -112,7 +112,7 @@ This mints value out of thin air. Fix: added `if (tx.value < 0n) throw new Error
 | `tx: negative gasPrice is rejected by validateTransaction` | `test/transaction.test.ts` | Negative gasPrice mints value | High |
 | `tx: zero value is allowed` | `test/transaction.test.ts` | Zero value boundary | — |
 
-**Test count: 48 (was 35 before first audit, 40 after first audit).**
+**Test count: 49 (was 35 before first audit, 40 after first audit, 48 after second audit).**
 
 ---
 
@@ -154,7 +154,8 @@ End-to-end pass: balances correct (sender −2 BIC −21k wei gas; miner +2 BIC 
 - Mining requires explicit consent; hash-rate throttle enforced.
 - JSON-RPC binds to loopback by default; no sensitive data exposed.
 - Private keys are never printed or logged.
-- All 48 tests pass; typecheck and lint clean.
+- Integration test child processes are always terminated (after fix).
+- All 49 tests pass; typecheck and lint clean.
 
 ### Assumptions / untested behavior
 - **State root:** keccak of JSON serialization (not MPT) — no light-client proofs possible (D-14).
@@ -196,6 +197,12 @@ End-to-end pass: balances correct (sender −2 BIC −21k wei gas; miner +2 BIC 
 - `--port`, `--http-port`, `--mining-rate` were always defaults
 
 **Fix:** Destructure `parsed.values` from the `parseArgs()` result.
+
+### Integration Test Defect Fixed (Process Leak)
+
+`test/integration-two-nodes.test.ts`: `stopNode(nodeB2)` and `stopNode(nodeA)` were called inside the `try` block, before the `finally` block that cleans up directories. If an assertion failed between lines 110-236, execution would jump to `finally` without stopping the child processes, potentially leaking tsx node processes.
+
+Fix: Moved `stopNode(nodeB2)` and `stopNode(nodeA)` into the `finally` block alongside `rmSync(dirC)`, so processes are always terminated even when an assertion fails.
 
 ### Integration Test Results (Real Two-Node Runtime)
 
