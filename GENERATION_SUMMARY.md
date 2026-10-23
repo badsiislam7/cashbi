@@ -3,6 +3,7 @@
 **Workspace:** `/workspaces/codespaces-blank`
 **Project:** CashBI — independent Layer 1 Proof-of-Work cryptocurrency (native coin ticker BIC), EVM-compatible execution, decentralized P2P networking, TypeScript/Node.js.
 **Status:** Development build (NOT production-ready); all work committed locally, nothing pushed/deployed.
+**Total commits:** 3 on branch `main` (`7d5df5a` initial, `e616c87` audit fixes, `28c8544` audit report)
 
 ---
 
@@ -36,11 +37,12 @@ CashBI is a real blockchain implementation (not a token, dashboard, or mock) con
 
 ---
 
-## 2. Files created (this session + cumulative)
+## 2. Files created (cumulative)
 
-### New documentation
+### Documentation
 - `README.md` — project overview, getting started, CLI/RPC, layout, doc map
 - `UNRESOLVED_DECISIONS.md` — D-1…D-21 open decisions with dev-default context
+- `AUDIT_REPORT.md` — adversarial technical audit report (per `do.md`), verified facts vs. assumptions, prioritized remaining risks
 - `docs/architecture.md` — data flow, consensus, storage, trust assumptions
 - `docs/networking.md` — P2P protocol, wire messages, discovery mechanisms, peer management
 - `docs/mining.md` — PoW algorithm, consent gate, resource limits, fork mining
@@ -50,60 +52,41 @@ CashBI is a real blockchain implementation (not a token, dashboard, or mock) con
 ### Tooling config
 - `eslint.config.js` — ESLint 9 flat config (`typescript-eslint` recommended + custom rules)
 
+### Scripts
+- `scripts/smoke.ts` — end-to-end dev smoke script (crypto → tx → mempool → mine → block accept → balances correct)
+
 ### Pre-existing user files preserved (not touched)
 - `do.md`, `do1.md` (original instructions/workspace rules)
 - `package.json`, `package-lock.json`, `tsconfig.json`
 
 ---
 
-## 3. Files modified (fixes since last checkpoint)
+## 3. Audit fixes applied (per `do.md` priorities 1–9)
 
-### `src/tx/execute.ts`
-- Changed `tx.gas <= baseGas` → `tx.gas < baseGas` so a plain transfer with exactly `gas = 21000` (Ethereum intrinsic gas) is valid. Previously a valid transfer was rejected with "gas must exceed the base transaction gas."
+### Confirmed bugs fixed
 
-### `src/chain/persist.ts`
-- `appendLedger`: async → synchronous (`openSync`/`writeSync`/`closeSync`) so ledger writes complete and are ordered before callers read them (fixes persistence roundtrip race).
-- `writeLedger`: async → synchronous for the same ordering guarantee.
-- Imports switched from `node:fs/promises` to `node:fs` sync equivalents.
+| Severity | File | Issue | Fix |
+|---|---|---|---|
+| Critical | `src/chain/blockchain.ts` | `tryImport()` called `execute()` per-tx without try/catch — invalid tx in a block crashed the accepting node | Wrapped per-tx execution in try/catch; block rejected with reason, node survives |
+| High | `src/chain/blockchain.ts` | Supply-cap check read backing state, not the journal overlay where the block reward was staged — reward could push supply over `MAX_TOTAL_SUPPLY` undetected | Check `totalSupply() + BLOCK_REWARD > MAX_TOTAL_SUPPLY` before applying reward |
+| Medium | `src/tx/mempool.ts` | `stats().pendingSenders` counted tx hashes (== `size`), not unique senders | Count unique recovered sender addresses via `recoverTransactionSender` |
+| Low | `src/util/bytes.ts` | `fromHex()` silently padded odd-length hex, masking malformed input | Strict — throws on odd-length hex |
+| Low | `src/crypto/keys.ts` | `isValidAddress()` would throw on odd-length hex instead of returning false | Try/catch, returns false |
+| Low | `src/vm/evm.ts` | `pop()` had misleading absolute-value code (dead code since `push()` wraps via `u256`) | Removed |
+| Low | `src/cli/index.ts` | `keygen` printed the private key to stdout (exposed in terminal logs/history) | Removed; only address shown |
 
-### `src/chain/blockchain.ts`
-- `appendLedger` call site: removed `void` (now synchronous).
+### Regression tests added
 
-### `src/mining/candidate.ts`
-- Removed duplicated/leftover `import type { WorldState as RealWorldState }` line.
+| Test | File | Bug covered |
+|---|---|---|
+| `chain: acceptBlock rejects block with invalid tx without crashing` | `test/chain.test.ts` | Critical crash bug |
+| `chain: block reward does not push total supply over MAX_TOTAL_SUPPLY` | `test/chain.test.ts` | High supply cap bug |
+| `chain: persistence skips corrupt trailing ledger lines` | `test/chain.test.ts` | Corrupt ledger recovery |
+| `mempool: stats pendingSenders counts unique senders, not tx hashes` | `test/transaction.test.ts` | Medium stats bug |
+| `crypto: fromHex rejects odd-length hex` | `test/crypto.test.ts` | Low hex parsing bug |
+| `crypto: odd-length hex address is invalid` | `test/crypto.test.ts` | Low address validation bug |
 
-### `src/net/server.ts`
-- Removed the second `socket.connect(port, host)` call in `connect()` that tore freshly opened outbound sockets down (peers connected then immediately disconnected).
-- Removed the `sendHello` call with `bestNumber: -1` from both outbound and inbound paths; HELLO is now sent by the node via `sendHelloWithTip` with the authoritative tip.
-- Removed unused `DEV_NETWORK_VERSION` import.
-- Removed temporary `CASHBI_P2P_DEBUG` stack-trace instrumentation.
-
-### `src/util/peer.ts`
-- `validHost`: hosts beginning with a digit must be valid IPv4 literals — rejects look-alike traps such as `10-1.2.3.4` (passes `test/security.test.ts`).
-
-### `src/consensus/pow.ts`
-- Fixed inaccurate comments: nonce serialization is 8-byte **BE** (not LE); retarget clamp is ×1/4…×4 per retarget (docstring said ×1/2…×2, matching the code).
-
-### `src/cli/index.ts`
-- Removed unused imports (`parseArgs`, `addressFromPrivateKey`, `privateKeyHex`, `fromHex`).
-- Removed unused `config = defaultNodeConfig(dataDir)` assignment (the config object is built inline in the return).
-
-### `src/crypto/keys.ts`
-- Removed unused `randomBytes32` import.
-
-### `src/net/server.ts` / `src/vm/evm.ts` / `src/state/world.ts` / `src/tx/transaction.ts`
-- Removed unused imports (`DEV_NETWORK_VERSION`, `toHex`, `padLeft`, `ECDSASignature`, `bigToHexBE`).
-
-### `scripts/smoke.ts`
-- Removed unused `minedBlock`/`minedNonce` vars and unused imports (`recoverAddress`, `blockHash`, `encodeBlock`, `decodeBlock`, `minerPriv`).
-
-### Test files
-- `test/chain.test.ts` — removed unused imports (`encodeBlock`, `Block`, `WorldState`) and deleted leftover dead helpers `tile()` and `b1TemplateOnly()`.
-- `test/crypto.test.ts` — removed unused `keccak256` import.
-- `test/evm.test.ts` — removed unused `OpCode`, `fromHex` imports.
-- `test/pow.test.ts` — removed unused `GENESIS_DIFFICULTY`, `hashHeaderWithoutNonce`, `bigToHexBE` imports.
-- `test/transaction.test.ts` — removed unused `from` binding.
-- `test/node.test.ts` — both nodes now share one `GenesisConfig` (they were on different networks; added `emptyGenesisConfig` import).
+**Test count: 40 (was 35 before audit).**
 
 ---
 
@@ -111,15 +94,18 @@ CashBI is a real blockchain implementation (not a token, dashboard, or mock) con
 
 | Check | Result |
 |---|---|
-| `npm test` (35 tests) | **35 pass, 0 fail** |
+| `npm test` (40 tests) | **40 pass, 0 fail** |
 | `npx tsc -p tsconfig.json --noEmit` | clean (0 errors) |
-| `npm run security:check` | clean (`npm audit`: 0 vulnerabilities; eslint: 0 errors; typecheck: clean) |
+| `npm run security:check` | clean (`npm audit`: 0 vulnerabilities; eslint: 0 errors/warnings; typecheck: clean) |
 | `scripts/smoke.ts` | end-to-end pass (crypto → tx → mempool → mine → block accept → balances correct) |
 
 Notable passing tests:
 - `chain: ledger persistence roundtrip`
 - `chain: mempool drops included transactions after block acceptance`
 - `chain: fork & reorg — deeper fork replaces the tip`
+- `chain: acceptBlock rejects block with invalid tx without crashing`
+- `chain: block reward does not push total supply over MAX_TOTAL_SUPPLY`
+- `chain: persistence skips corrupt trailing ledger lines`
 - `two full nodes sync and gossip blocks + transactions`
 - `security: no hardcoded non-loopback IPv4 addresses in src`
 - `security: peer address parser defensively rejects bad input`
@@ -129,11 +115,12 @@ Notable passing tests:
 ## 5. Git
 
 - `git init` run in `/workspaces/codespaces-blank`
-- Initial commit `7d5df5a` on branch `main`
+- Branch `main`, 3 commits:
+  - `7d5df5a` — CashBI initial commit: Layer 1 PoW blockchain (BIC)
+  - `e616c87` — audit: fix confirmed bugs and add regression tests
+  - `28c8544` — docs: add adversarial technical audit report
 - Working tree clean
 - **No remote configured, nothing pushed** (per user instruction)
-
-Commit message summary: "CashBI initial commit: Layer 1 PoW blockchain (BIC)" — covers all source, tests, docs, config, tooling, and the preserved user files `do.md`/`do1.md`.
 
 ---
 
@@ -163,6 +150,8 @@ All permanent consensus parameters are explicitly **unresolved**; `src/config/pa
 ├── do1.md
 ├── README.md
 ├── UNRESOLVED_DECISIONS.md
+├── AUDIT_REPORT.md
+├── GENERATION_SUMMARY.md
 ├── SECURITY.md
 ├── .gitignore
 ├── eslint.config.js
@@ -211,3 +200,4 @@ All permanent consensus parameters are explicitly **unresolved**; `src/config/pa
 - No permanent consensus parameters invented.
 - Nothing outside `/workspaces/codespaces-blank` was created or modified.
 - No existing user files (`do.md`, `do1.md`) were deleted or overwritten.
+- Not claimed production-ready; no formal security audit performed.
