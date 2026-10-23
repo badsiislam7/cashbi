@@ -1,0 +1,44 @@
+{
+  "name": "cashbi",
+  "version": "0.1.0",
+  "description": "CashBI: an independent, EVM-compatible Layer 1 Proof-of-Work blockchain with native coin BIC (development build, not production-ready).",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "cashbi": "dist/cli/index.js"
+  },
+  "main": "dist/node/node.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "tsx src/cli/index.ts start",
+    "mine": "tsx src/cli/index.ts mine",
+    "keygen": "tsx src/cli/index.ts keygen",
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "security:audit": "npm audit --audit-level=critical",
+    "security:check": "npm run security:audit && npm run lint && npm run typecheck"
+  },
+  "keywords": [
+    "blockchain",
+    "cashbi",
+    "bic",
+    "proof-of-work",
+    "evm",
+    "layer1"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "eslint": "^9.17.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.72.0"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.8.1",
+    "@noble/hashes": "^1.7.1"
+  }
+}

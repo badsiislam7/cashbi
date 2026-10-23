@@ -1,0 +1,36 @@
+# CashBI .gitignore
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Dev data directories (chains, keys, peer cache)
+data*/
+*.jsonl
+wallet.json
+genesis.json
+peers.json
+
+# Logs
+*.log
+logs/
+
+# Runtime/cache
+.env
+*.local
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Temp
+.tmp*/
+*.tmp
