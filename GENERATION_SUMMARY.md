@@ -3,12 +3,15 @@
 **Workspace:** `/workspaces/codespaces-blank`
 **Project:** CashBI — independent Layer 1 Proof-of-Work cryptocurrency (native coin ticker BIC), EVM-compatible execution, decentralized P2P networking, TypeScript/Node.js.
 **Status:** Development build (NOT production-ready); all work committed locally, nothing pushed/deployed.
-**Total commits:** 4 on branch `main` (`7d5df5a` initial, `e616c87` first audit fixes, `28c8544` first audit report, `255a1ae` generation summary regen)
+**Total commits:** 5 on branch `main` (`7d5df5a` initial, `e616c87` first audit fixes, `28c8544` first audit report, `255a1ae` generation summary regen, `2f5f2c7` second audit fixes)
 
 **Second audit complete:** The updated `do.md` calls for a deeper consensus and economic-security audit. This added:
 - 2 high-severity bug fixes (negative value and negative gasPrice value creation)
-- 7 new regression tests (chain reorg consistency, invalid difficulty, modified headers, duplicate txs, rejected block state integrity, negative value, negative gasPrice, zero value boundary)
-- Test count: 48 (up from 40 after first audit, 35 originally)
+- 1 critical CLI bug fix (parseArgs `values` not destructured — all CLI flags silently ignored)
+- 8 new regression tests (chain reorg consistency, invalid difficulty, modified headers, duplicate txs, rejected block state integrity, negative value, negative gasPrice, zero value boundary)
+- 1 automated two-node integration test (real processes, TCP P2P)
+- docs/testnet-two-nodes.md — reproducible two-node testnet procedure
+- Test count: 49 (up from 48 after second audit, 40 after first audit, 35 originally)
 - All checks pass: tests, typecheck, lint, npm audit
 
 ---
@@ -87,6 +90,7 @@ CashBI is a real blockchain implementation (not a token, dashboard, or mock) con
 |---|---|---|---|
 | High | `src/tx/transaction.ts` | `validateTransaction()` didn't check `tx.value >= 0` — negative value mints value | Added `if (tx.value < 0n) throw new Error("value must be non-negative")` |
 | High | `src/tx/transaction.ts` | `validateTransaction()` didn't check `tx.gasPrice >= 0n` — negative gasPrice mints value | Added `if (tx.gasPrice < 0n) throw new Error("gasPrice must be non-negative")` |
+| Critical | `src/cli/index.ts` | `parseStartOptions()` didn't destructure `parsed.values` from `parseArgs()` — all CLI flags (`--allow-mining`, `--coinbase`, `--port`, etc.) silently ignored | Destructure `{ values: parsed }` from `parseArgs()` result |
 
 ### Regression tests added (cumulative)
 
@@ -108,7 +112,10 @@ CashBI is a real blockchain implementation (not a token, dashboard, or mock) con
 - `tx: negative gasPrice is rejected by validateTransaction`
 - `tx: zero value is allowed`
 
-**Test count: 48 (was 35 originally, 40 after first audit).**
+#### Integration test (new file)
+- `test/integration-two-nodes.test.ts` — two real node processes, TCP P2P, tx propagation, block convergence, restart recovery, mismatched genesis rejection
+
+**Test count: 49 (was 35 originally, 40 after first audit, 48 after second audit).**
 
 ---
 
@@ -116,10 +123,11 @@ CashBI is a real blockchain implementation (not a token, dashboard, or mock) con
 
 | Check | Result |
 |---|---|
-| `npm test` (48 tests) | **48 pass, 0 fail** |
+| `npm test` (49 tests) | **49 pass, 0 fail** |
 | `npx tsc -p tsconfig.json --noEmit` | clean (0 errors) |
 | `npm run security:check` | clean (`npm audit`: 0 vulnerabilities; eslint: 0 errors/warnings; typecheck: clean) |
 | `scripts/smoke.ts` | end-to-end pass (crypto → tx → mempool → mine → block accept → balances correct) |
+| `test/integration-two-nodes.test.ts` | real two-node runtime test pass (~5.6s) |
 
 Notable passing tests:
 - `chain: ledger persistence roundtrip`
@@ -136,6 +144,7 @@ Notable passing tests:
 - `tx: negative value is rejected by validateTransaction`
 - `tx: negative gasPrice is rejected by validateTransaction`
 - `tx: zero value is allowed`
+- `integration: two real nodes sync, propagate tx, mine block, restart recovery`
 - `two full nodes sync and gossip blocks + transactions`
 - `security: no hardcoded non-loopback IPv4 addresses in src`
 - `security: peer address parser defensively rejects bad input`
@@ -145,12 +154,13 @@ Notable passing tests:
 ## 5. Git
 
 - `git init` run in `/workspaces/codespaces-blank`
-- Branch `main`, 4 commits:
+- Branch `main`, 5 commits:
   - `7d5df5a` — CashBI initial commit: Layer 1 PoW blockchain (BIC)
   - `e616c87` — first audit: fix confirmed bugs and add regression tests
   - `28c8544` — docs: add adversarial technical audit report
   - `255a1ae` — docs: regenerate generation summary with complete workspace record
-  - *(pending commit: second audit fixes + updated audit report + generation summary)*
+  - `2f5f2c7` — second audit: consensus and economic-security fixes
+- Working tree clean
 - **No remote configured, nothing pushed** (per user instruction)
 
 ---
@@ -211,6 +221,7 @@ All permanent consensus parameters are explicitly **unresolved**; `src/config/pa
 │   ├── crypto.test.ts
 │   ├── evm.test.ts
 │   ├── helpers.ts
+│   ├── integration-two-nodes.test.ts
 │   ├── node.test.ts
 │   ├── pow.test.ts
 │   ├── rlp.test.ts
@@ -219,7 +230,8 @@ All permanent consensus parameters are explicitly **unresolved**; `src/config/pa
 └── docs/
     ├── architecture.md
     ├── mining.md
-    └── networking.md
+    ├── networking.md
+    └── testnet-two-nodes.md
 ```
 
 ---

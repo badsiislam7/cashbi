@@ -186,7 +186,60 @@ End-to-end pass: balances correct (sender −2 BIC −21k wei gas; miner +2 BIC 
 
 ---
 
+## Second Audit — Additional Findings (CLI parseArgs Bug)
+
+### Confirmed bug fixed (Critical)
+
+**`src/cli/index.ts`**: `parseStartOptions()` called `node:util`'s `parseArgs()` but accessed the result as a flat object (`parsed["allow-mining"]`) instead of `parsed.values["allow-mining"]`. `parseArgs()` returns `{ values: {...}, positionals: [] }`, so ALL CLI flags (`--allow-mining`, `--coinbase`, `--port`, `--mining-rate`, etc.) were silently ignored, falling back to defaults. This meant:
+- `--allow-mining` never took effect — mining was always disabled via CLI
+- `--coinbase` was always null — miners had no coinbase address
+- `--port`, `--http-port`, `--mining-rate` were always defaults
+
+**Fix:** Destructure `parsed.values` from the `parseArgs()` result.
+
+### Integration Test Results (Real Two-Node Runtime)
+
+**`test/integration-two-nodes.test.ts`** — automated integration test using two real `tsx` node processes with actual TCP P2P connectivity. All steps pass:
+
+| Step | Result | Evidence |
+|------|--------|----------|
+| Node A start (miner) | Pass | `chainId=901291`, genesis=`0x88b258e9...`, tip=1, mining enabled |
+| Node B start (sync) | Pass | Same chainId and genesis, tip=0, connects to A |
+| P2P connection | Pass | `net_peerCount` = 1 on both nodes |
+| Genesis match | Pass | Both report identical genesis hash |
+| Tx submission to A | Pass | `bic_sendRawTransaction` returns tx hash |
+| Balance propagation | Pass | Recipient balance identical on both nodes |
+| Block convergence | Pass | Both nodes converge on same tip number and hash |
+| Node B restart recovery | Pass | Recovers tip from `blocks.jsonl`, reconnects to A |
+| Mismatched genesis rejection | Pass | Exit code 1, "stored genesis hash mismatch" |
+
+**`docs/testnet-two-nodes.md`** — documents the exact reproducible procedure with expected outputs for each step.
+
+---
+
+## Commands and Results
+
+```
+$ npm test
+49 tests, 0 failures, duration ~13s (48 unit + 1 integration)
+
+$ npx tsc -p tsconfig.json --noEmit
+0 errors
+
+$ npm run lint (eslint .)
+0 errors, 0 warnings
+
+$ npm audit --audit-level=critical
+found 0 vulnerabilities
+
+$ npm run security:check
+All three sub-checks pass
+
+---
+
 ## Constraints Honored
+```
+
 
 - ✅ All project files directly inside `/workspaces/codespaces-blank` (no nested dir)
 - ✅ User files `do.md` and `do1.md` preserved (do.md updated with new priorities as part of project evolution)

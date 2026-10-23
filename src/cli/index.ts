@@ -97,7 +97,7 @@ async function commandKeygen(rest: string[]): Promise<void> {
 
 /** Options parser for `start` — explicit, typed, keeps argv order-insensitive. */
 async function parseStartOptions(rest: string[]): Promise<StartOptions> {
-  const parsed = (await import("node:util")).parseArgs({
+  const { values: parsed } = (await import("node:util")).parseArgs({
     args: rest,
     options: {
       data: { type: "string", short: "d" },
@@ -114,7 +114,7 @@ async function parseStartOptions(rest: string[]): Promise<StartOptions> {
       "chain-id": { type: "string" },
     },
     strict: false,
-  }) as unknown as Record<string, string | string[] | boolean | undefined>;
+  }) as unknown as { values: Record<string, string | string[] | boolean | undefined>; positionals: string[] };
 
   const dataDir = resolve((parsed["data"] as string) ?? ".");
   const peers = splitList(parsed["peers"] as string | undefined);
