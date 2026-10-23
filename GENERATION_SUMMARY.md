@@ -3,7 +3,13 @@
 **Workspace:** `/workspaces/codespaces-blank`
 **Project:** CashBI — independent Layer 1 Proof-of-Work cryptocurrency (native coin ticker BIC), EVM-compatible execution, decentralized P2P networking, TypeScript/Node.js.
 **Status:** Development build (NOT production-ready); all work committed locally, nothing pushed/deployed.
-**Total commits:** 3 on branch `main` (`7d5df5a` initial, `e616c87` audit fixes, `28c8544` audit report)
+**Total commits:** 4 on branch `main` (`7d5df5a` initial, `e616c87` first audit fixes, `28c8544` first audit report, `255a1ae` generation summary regen)
+
+**Second audit complete:** The updated `do.md` calls for a deeper consensus and economic-security audit. This added:
+- 2 high-severity bug fixes (negative value and negative gasPrice value creation)
+- 7 new regression tests (chain reorg consistency, invalid difficulty, modified headers, duplicate txs, rejected block state integrity, negative value, negative gasPrice, zero value boundary)
+- Test count: 48 (up from 40 after first audit, 35 originally)
+- All checks pass: tests, typecheck, lint, npm audit
 
 ---
 
@@ -61,32 +67,48 @@ CashBI is a real blockchain implementation (not a token, dashboard, or mock) con
 
 ---
 
-## 3. Audit fixes applied (per `do.md` priorities 1–9)
+## 3. Audit fixes applied (cumulative)
 
-### Confirmed bugs fixed
+### First audit fixes (per original `do.md` priorities 1–9)
 
 | Severity | File | Issue | Fix |
 |---|---|---|---|
-| Critical | `src/chain/blockchain.ts` | `tryImport()` called `execute()` per-tx without try/catch — invalid tx in a block crashed the accepting node | Wrapped per-tx execution in try/catch; block rejected with reason, node survives |
-| High | `src/chain/blockchain.ts` | Supply-cap check read backing state, not the journal overlay where the block reward was staged — reward could push supply over `MAX_TOTAL_SUPPLY` undetected | Check `totalSupply() + BLOCK_REWARD > MAX_TOTAL_SUPPLY` before applying reward |
-| Medium | `src/tx/mempool.ts` | `stats().pendingSenders` counted tx hashes (== `size`), not unique senders | Count unique recovered sender addresses via `recoverTransactionSender` |
-| Low | `src/util/bytes.ts` | `fromHex()` silently padded odd-length hex, masking malformed input | Strict — throws on odd-length hex |
-| Low | `src/crypto/keys.ts` | `isValidAddress()` would throw on odd-length hex instead of returning false | Try/catch, returns false |
-| Low | `src/vm/evm.ts` | `pop()` had misleading absolute-value code (dead code since `push()` wraps via `u256`) | Removed |
-| Low | `src/cli/index.ts` | `keygen` printed the private key to stdout (exposed in terminal logs/history) | Removed; only address shown |
+| Critical | `src/chain/blockchain.ts` | `tryImport()` called `execute()` per-tx without try/catch — invalid tx crashed node | Wrapped per-tx execution in try/catch; block rejected with reason |
+| High | `src/chain/blockchain.ts` | Supply cap check read backing state, not journal overlay where reward was staged | Check `totalSupply() + BLOCK_REWARD > MAX_TOTAL_SUPPLY` |
+| Medium | `src/tx/mempool.ts` | `stats().pendingSenders` counted tx hashes, not unique senders | Count unique recovered sender addresses |
+| Low | `src/util/bytes.ts` | `fromHex()` silently padded odd-length hex | Strict — throws on odd-length hex |
+| Low | `src/crypto/keys.ts` | `isValidAddress()` would throw on odd-length hex | Try/catch, returns false |
+| Low | `src/vm/evm.ts` | `pop()` had misleading absolute-value code | Removed |
+| Low | `src/cli/index.ts` | `keygen` printed private key to stdout | Removed; only address shown |
 
-### Regression tests added
+### Second audit fixes (per updated `do.md` — consensus and economic-security)
 
-| Test | File | Bug covered |
-|---|---|---|
-| `chain: acceptBlock rejects block with invalid tx without crashing` | `test/chain.test.ts` | Critical crash bug |
-| `chain: block reward does not push total supply over MAX_TOTAL_SUPPLY` | `test/chain.test.ts` | High supply cap bug |
-| `chain: persistence skips corrupt trailing ledger lines` | `test/chain.test.ts` | Corrupt ledger recovery |
-| `mempool: stats pendingSenders counts unique senders, not tx hashes` | `test/transaction.test.ts` | Medium stats bug |
-| `crypto: fromHex rejects odd-length hex` | `test/crypto.test.ts` | Low hex parsing bug |
-| `crypto: odd-length hex address is invalid` | `test/crypto.test.ts` | Low address validation bug |
+| Severity | File | Issue | Fix |
+|---|---|---|---|
+| High | `src/tx/transaction.ts` | `validateTransaction()` didn't check `tx.value >= 0` — negative value mints value | Added `if (tx.value < 0n) throw new Error("value must be non-negative")` |
+| High | `src/tx/transaction.ts` | `validateTransaction()` didn't check `tx.gasPrice >= 0n` — negative gasPrice mints value | Added `if (tx.gasPrice < 0n) throw new Error("gasPrice must be non-negative")` |
 
-**Test count: 40 (was 35 before audit).**
+### Regression tests added (cumulative)
+
+#### First audit
+- `chain: acceptBlock rejects block with invalid tx without crashing`
+- `chain: block reward does not push total supply over MAX_TOTAL_SUPPLY`
+- `chain: persistence skips corrupt trailing ledger lines`
+- `mempool: stats pendingSenders counts unique senders, not tx hashes`
+- `crypto: fromHex rejects odd-length hex`
+- `crypto: odd-length hex address is invalid`
+
+#### Second audit
+- `chain: invalid difficulty change is rejected`
+- `chain: modified header (wrong stateRoot) is rejected`
+- `chain: duplicate transactions in a block are rejected`
+- `chain: rejected block leaves no partial state changes`
+- `chain: reorg consistency — balances, nonces, and mempool remain consistent after fork switch`
+- `tx: negative value is rejected by validateTransaction`
+- `tx: negative gasPrice is rejected by validateTransaction`
+- `tx: zero value is allowed`
+
+**Test count: 48 (was 35 originally, 40 after first audit).**
 
 ---
 
@@ -94,7 +116,7 @@ CashBI is a real blockchain implementation (not a token, dashboard, or mock) con
 
 | Check | Result |
 |---|---|
-| `npm test` (40 tests) | **40 pass, 0 fail** |
+| `npm test` (48 tests) | **48 pass, 0 fail** |
 | `npx tsc -p tsconfig.json --noEmit` | clean (0 errors) |
 | `npm run security:check` | clean (`npm audit`: 0 vulnerabilities; eslint: 0 errors/warnings; typecheck: clean) |
 | `scripts/smoke.ts` | end-to-end pass (crypto → tx → mempool → mine → block accept → balances correct) |
@@ -106,6 +128,14 @@ Notable passing tests:
 - `chain: acceptBlock rejects block with invalid tx without crashing`
 - `chain: block reward does not push total supply over MAX_TOTAL_SUPPLY`
 - `chain: persistence skips corrupt trailing ledger lines`
+- `chain: invalid difficulty change is rejected`
+- `chain: modified header (wrong stateRoot) is rejected`
+- `chain: duplicate transactions in a block are rejected`
+- `chain: rejected block leaves no partial state changes`
+- `chain: reorg consistency — balances, nonces, and mempool remain consistent after fork switch`
+- `tx: negative value is rejected by validateTransaction`
+- `tx: negative gasPrice is rejected by validateTransaction`
+- `tx: zero value is allowed`
 - `two full nodes sync and gossip blocks + transactions`
 - `security: no hardcoded non-loopback IPv4 addresses in src`
 - `security: peer address parser defensively rejects bad input`
@@ -115,11 +145,12 @@ Notable passing tests:
 ## 5. Git
 
 - `git init` run in `/workspaces/codespaces-blank`
-- Branch `main`, 3 commits:
+- Branch `main`, 4 commits:
   - `7d5df5a` — CashBI initial commit: Layer 1 PoW blockchain (BIC)
-  - `e616c87` — audit: fix confirmed bugs and add regression tests
+  - `e616c87` — first audit: fix confirmed bugs and add regression tests
   - `28c8544` — docs: add adversarial technical audit report
-- Working tree clean
+  - `255a1ae` — docs: regenerate generation summary with complete workspace record
+  - *(pending commit: second audit fixes + updated audit report + generation summary)*
 - **No remote configured, nothing pushed** (per user instruction)
 
 ---

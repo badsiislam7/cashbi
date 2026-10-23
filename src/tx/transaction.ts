@@ -183,6 +183,8 @@ export function validateTransaction(
   if (tx.chainId !== ctx.chainId) throw new Error(`tx.chainId ${tx.chainId} does not match ${ctx.chainId}`);
   if (tx.nonce < ctx.senderNonce) throw new Error("nonce too low");
   if (tx.gas <= 0n) throw new Error("gas must be positive");
+  if (tx.gasPrice < 0n) throw new Error("gasPrice must be non-negative");
+  if (tx.value < 0n) throw new Error("value must be non-negative");
   if (tx.data.length > MAX_TX_BYTES) throw new Error("tx data exceeds MAX_TX_BYTES");
   if (tx.to && !isHex(tx.to)) throw new Error("invalid recipient address");
   const maxSpend = tx.value + tx.gas * tx.gasPrice;

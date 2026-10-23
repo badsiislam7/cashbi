@@ -124,3 +124,54 @@ test("mempool: stats pendingSenders counts unique senders, not tx hashes", () =>
   assert.equal(pool.stats().size, 3);
   assert.equal(pool.stats().pendingSenders, 2, "two unique senders: alice and bob");
 });
+
+test("tx: negative gasPrice is rejected by validateTransaction", () => {
+  const { address: to } = randomAccount();
+  const ctx = { chainId: DEV_CHAIN_ID, senderNonce: 0n, senderBalance: BIC(100n) };
+  // Construct a Transaction directly (bypassing RLP/signing which would reject negatives first)
+  const tx = {
+    nonce: 0n,
+    to,
+    value: 1n,
+    data: new Uint8Array(0),
+    gasPrice: -1n,
+    gas: 21_000n,
+    chainId: DEV_CHAIN_ID,
+    v: 0,
+    r: "0x" + "00".repeat(32),
+    s: "0x" + "00".repeat(32),
+  };
+  assert.throws(
+    () => validateTransaction(tx, ctx),
+    /gasPrice must be non-negative/,
+  );
+});
+
+test("tx: negative value is rejected by validateTransaction", () => {
+  const { address: to } = randomAccount();
+  const ctx = { chainId: DEV_CHAIN_ID, senderNonce: 0n, senderBalance: BIC(100n) };
+  // Construct a Transaction directly (bypassing RLP/signing which would reject negatives first)
+  const tx = {
+    nonce: 0n,
+    to,
+    value: -1n,
+    data: new Uint8Array(0),
+    gasPrice: 1n,
+    gas: 21_000n,
+    chainId: DEV_CHAIN_ID,
+    v: 0,
+    r: "0x" + "00".repeat(32),
+    s: "0x" + "00".repeat(32),
+  };
+  assert.throws(
+    () => validateTransaction(tx, ctx),
+    /value must be non-negative/,
+  );
+});
+
+test("tx: zero value is allowed", () => {
+  const { address: to, privateKey } = randomAccount();
+  const ctx = { chainId: DEV_CHAIN_ID, senderNonce: 0n, senderBalance: BIC(100n) };
+  const result = validateTransaction(signTransaction({ nonce: 0n, to, value: 0n, data: new Uint8Array(0), gasPrice: 1n, gas: 21_000n, chainId: DEV_CHAIN_ID }, privateKey), ctx);
+  assert.equal(result.sender, recoverTransactionSender(signTransaction({ nonce: 0n, to, value: 0n, data: new Uint8Array(0), gasPrice: 1n, gas: 21_000n, chainId: DEV_CHAIN_ID }, privateKey), DEV_CHAIN_ID));
+});

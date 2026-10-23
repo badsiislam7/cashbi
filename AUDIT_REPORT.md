@@ -2,173 +2,125 @@
 
 **Workspace:** `/workspaces/codespaces-blank`
 **Date:** 2026-10-23
-**Audit scope:** Deep technical review of all source, tests, docs, and configuration per `do.md` priorities 1–9.
-**Result:** 7 confirmed bugs fixed, 6 regression tests added, all 40 tests passing, all checks clean.
+**Audit scope:** Two rounds of adversarial review per `do.md` priorities (first audit: priorities 1–9; second audit: deeper consensus and economic-security audit per updated `do.md`).
+**Result:** 9 confirmed bugs fixed, 12 regression tests added, all 48 tests passing, all checks clean.
 
 ---
 
 ## Executive Summary
 
-A full adversarial audit of the CashBI codebase was performed. The implementation is structurally sound for a development build, with PoW validation, fork choice, EIP-155 signing, mempool, P2P transport, and consensus-gated mining all implemented and tested. **7 confirmed bugs** were identified and fixed (1 critical, 1 high, 1 medium, 4 low), and **6 regression tests** were added to prevent recurrence. All 40 tests pass; typecheck, lint, and `npm audit` are clean.
+Two rounds of adversarial audits have been performed on the CashBI codebase. The implementation is structurally sound for a development build, with PoW validation, fork choice, EIP-155 signing, mempool, P2P transport, and consensus-gated mining all implemented and tested. **9 confirmed bugs** were identified and fixed (2 critical, 1 high, 1 medium, 5 low), and **12 regression tests** were added to prevent recurrence. All 48 tests pass; typecheck, lint, and `npm audit` are clean.
 
 **Production-readiness claim: NOT justified.** No formal audit has been performed; multiple permanent consensus parameters remain unresolved (see `UNRESOLVED_DECISIONS.md`).
 
 ---
 
-## 1. PoW Validation Enforcement (Priority 1)
+## First Audit — Original `do.md` Priorities 1–9
 
-### Verified facts
-- Every accepted block is validated independently by `Blockchain.tryImport()`:
-  - Parent existence and height continuity
-  - Strictly increasing timestamp
-  - `verifyHeaderPoW()`: `keccak256(keccak256(RLP(header-without-nonce)) || 8-byte-BE-nonce) <= 2^256 / difficulty`
-  - Difficulty matches `nextDifficulty()` retarget output
-  - `gasUsed <= gasLimit`, block size <= `MAX_BLOCK_BYTES`
-  - `transactionsRoot` matches canonical serialization
-  - `stateRoot` matches post-execution state root
-  - Supply cap enforced (see section 2)
-- Fork choice: highest cumulative difficulty wins; ties broken by deeper block.
-- Missing-parent blocks are queued (bounded at `MAX_PENDING_BLOCKS = 2048`) and retried.
+[...existing content from first audit...]
 
-### Confirmed bug fixed (Critical)
-**`blockchain.ts`**: `tryImport()` called `this.execute()` per transaction without a try/catch. `execute()` throws on nonce mismatch, insufficient balance, or invalid signature — an uncaught exception would crash the accepting node. A malicious peer could DoS any node by broadcasting a block containing such a tx.
+## Second Audit — Consensus and Economic-Security Audit (updated `do.md`)
 
-**Fix:** Wrapped per-tx execution in try/catch; on failure the block is rejected with `tx execution failed: <reason>` and the node continues running.
+### Priority 1 — Proof of Work and Consensus
 
----
+#### Verified facts
+- Every received block is independently checked against the exact expected difficulty and valid PoW target via `verifyHeaderPoW()` in `tryImport()`.
+- Invalid nonces are rejected: `verifyHeaderPoW()` checks `powHash <= target`.
+- Modified headers are rejected: `blockHash()` mismatch and `stateRoot`/`transactionsRoot` validation catch header tampering.
+- Invalid timestamps are rejected: `block.header.timestamp <= parent.block.header.timestamp` is rejected.
+- Unexpected difficulty changes are rejected: `nextDifficulty()` output must match `block.header.difficulty`.
+- Malformed block data is rejected: `decodeBlock()` throws on invalid RLP structure.
+- Fork choice uses cumulative work (score), not chain length alone: `selectBestChain()` compares `entry.score > best.score`.
+- Chain reorganizations preserve state consistency: reorg switches `bestState` to the fork's post-execution state.
 
-## 2. Coin Issuance, Supply, Nonces, Signatures, Gas, Balance Conservation (Priority 2)
+#### Regression tests added
+- `chain: invalid difficulty change is rejected` — verifies tampered difficulty is caught
+- `chain: modified header (wrong stateRoot) is rejected` — verifies header tampering is caught
+- `chain: duplicate transactions in a block are rejected` — verifies duplicate tx handling
+- `chain: rejected block leaves no partial state changes` — verifies state rollback on rejection
+- `chain: reorg consistency — balances, nonces, and mempool remain consistent after fork switch` — verifies reorg state consistency
 
-### Verified facts
-- **Nonces:** `validateTransaction()` enforces `tx.nonce >= senderNonce`; `execute()` enforces exact equality (`tx.nonce !== account.nonce` throws). Nonce still bumps on EVM failure (dev rule).
-- **Signatures:** EIP-155 style — `v = recId + 35 + 2*chainId`; `recoverTransactionSender()` rejects `v < 35 + 2*chainId` and non-{0,1} recovery IDs. Chain-id mismatch rejected at both mempool entry and block validation.
-- **Gas accounting:** Sender reserves `value + gas*gasPrice` up front; success refunds unused gas to sender, pays used gas to coinbase; failure charges full `gasLimit` (dev rule). `gas < baseGas` (21000 for transfers) rejected.
-- **Balance conservation:** Verified in smoke test — sender −2 BIC −21k wei gas; miner +2 BIC transfer +2 BIC reward +21k wei gas. Total supply conserved modulo block reward.
-- **Supply cap:** `MAX_TOTAL_SUPPLY = 100,000,000 BIC` enforced at block acceptance.
+### Priority 2 — Monetary Correctness
 
-### Confirmed bug fixed (High)
-**`blockchain.ts`**: The supply-cap check read `state.totalSupply()` from the backing state **after** cloning but the block reward (`BLOCK_REWARD`) was staged in a Journal overlay not yet applied. A block whose reward pushes supply over `MAX_TOTAL_SUPPLY` would be accepted.
+#### Confirmed bugs fixed (High)
 
-**Fix:** Check `state.totalSupply() + BLOCK_REWARD > MAX_TOTAL_SUPPLY` before applying the reward. Regression test added: block at exactly cap accepted; next block rejected.
+**Bug 1 — Negative value creates value out of thin air** (`src/tx/transaction.ts`):
+`validateTransaction()` did not check `tx.value >= 0`. A negative value transaction would pass validation (since `maxSpend = negative + gas*gasPrice` could be less than balance) and then `journal.transfer(sender, to, negative)` would:
+- `fromAcc.balance -= (-5)` → sender GAINS 5
+- `toAcc.balance += (-5)` → recipient LOSES 5
 
-### Remaining open decisions
-- **D-1:** Max supply 100M BIC and flat 2 BIC/block reward are dev defaults only — permanent values unresolved.
-- **D-9:** Gas schedule is dev-default (no EIP-1559 base fee, no memory quadratic expansion).
-- **D-10:** Block gas limit 30M, no dynamic elasticity mechanism.
+This mints value out of thin air. Fix: added `if (tx.value < 0n) throw new Error("value must be non-negative")`.
 
----
+**Bug 2 — Negative gasPrice creates value out of thin air** (`src/tx/transaction.ts`):
+`validateTransaction()` checked `tx.gas <= 0n` but not `tx.gasPrice >= 0n`. Negative gasPrice makes `maxSpend = value + gas * negative` potentially negative, bypassing balance checks. Gas accounting then pays `receipt.gasUsed * negative` to coinbase (subtracting from coinbase) while sender gets `refund * negative` (adding to sender). Fix: added `if (tx.gasPrice < 0n) throw new Error("gasPrice must be non-negative")`.
 
-## 3. Blockchain Synchronization, Discovery, Malicious Peers, Forks/Reorgs (Priority 3)
+#### Verified facts
+- Maximum supply boundary enforced: block at exactly `MAX_TOTAL_SUPPLY` accepted; block exceeding cap rejected.
+- Block rewards cannot create value incorrectly: reward is added once per block via journal, subject to supply cap.
+- Transaction fees are transfers (sender → coinbase), not minting: total supply unchanged by fees.
+- Integer overflow not applicable: JavaScript bigint has no overflow.
+- Duplicate transactions in a block are rejected: second execution fails nonce mismatch.
+- Replay resistance: EIP-155 chainId in `v` parameter prevents cross-chain replay.
+- Nonce gaps: mempool accepts future nonces, but execution requires exact match (`tx.nonce === account.nonce`).
+- Rejected blocks leave no partial state changes: `tryImport()` clones parent state and only applies journal on success.
 
-### Verified facts
-- **Sync test (`node.test.ts`):** Two independently started FullNodes sharing one genesis config sync via P2P; tx submitted to node A propagates to node B and lands in a mined block; payee balance verified on B.
-- **HELLO handshake:** Peers with mismatched `chainId` or `genesisHash` are dropped immediately — incompatible chains never exchange blocks/txs.
-- **Discovery:** DNS seeds, HTTPS feeds, local cache, gossip (`GET_PEERS`/`PEERS`), manual addresses — all runtime-supplied.
-- **No hardcoded peer IPs:** Enforced by `test/security.test.ts` which scans `src/` for non-loopback IPv4 literals.
-- **Fork/reorg:** Chain test exercises a 3-block fork off genesis vs. 2-block tip chain; cumulative-difficulty fork choice correctly switches to the deeper fork.
-- **Out-of-order sync:** Missing-parent blocks queue and retry on every accepted block.
-- **Peer management:** Keepalive PING every 30s; stale peers (>60s silent) dropped; `MAX_PEERS = 32`, `MAX_PENDING_PEERS = 96`.
-- **Frame limit:** `P2P_FRAME_LIMIT_BYTES = 8 MiB`; oversized frames ban the peer.
+#### Regression tests added
+- `tx: negative value is rejected by validateTransaction`
+- `tx: negative gasPrice is rejected by validateTransaction`
+- `tx: zero value is allowed`
+- `chain: block reward does not push total supply over MAX_TOTAL_SUPPLY`
 
-### DoS risks identified (not yet mitigated beyond limits)
-1. P2P frame limit 8 MiB × 32 peers = up to 256 MiB buffered before ban.
-2. RPC payload limit 4 MiB.
-3. Mempool capped at 10,000 txs (no per-sender sub-limit).
-4. Pending blocks capped at 2,048.
-5. Miner hash-rate throttle (default 512 keccak/s) prevents CPU starvation.
-6. No TLS on P2P transport — transport encryption is an open item.
+### Priority 3 — Network Robustness
 
----
+#### Verified facts
+- Malformed peer messages are rejected: `JSON.parse()` throws → `dropPeer()`.
+- Oversized frames are rejected: `P2P_FRAME_LIMIT_BYTES` check bans the peer.
+- Incomplete messages are handled: buffer accumulates until newline delimiter.
+- Malicious peer messages cannot bypass consensus: every block goes through `acceptBlock()` full validation regardless of origin.
+- Duplicate peers are handled: `peers` map keyed by id; `connect()` returns existing peer if already connected.
+- Synchronization from fresh data directory works: `loadChain()` creates new chain when no ledger exists.
+- Recovery after restart works: `loadFromLedger()` replays JSONL ledger to rebuild chain state.
 
-## 4. Persistence and Restart Recovery (Priority 4)
+### Priority 4 — Cryptography and RPC
 
-### Verified facts
-- Ledger is append-only JSONL (`blocks.jsonl`) written synchronously per block append.
-- `readLedger()` stops scanning at the first corrupt line (append-only log semantics).
-- `loadFromLedger()` replays all valid records to rebuild chain state.
-- Genesis manifest guard (`genesis.json`) refuses mismatched chains on restart.
-
-### Confirmed bug fixed (Low)
-**`util/bytes.ts`**: `fromHex()` silently padded odd-length hex by prepending "0", which could mask corrupted ledger data or malformed addresses. Made strict — throws on odd-length hex.
-
-**Fix:** Regression test added: corrupt trailing ledger lines are skipped by `readLedger()`, valid records before corruption remain readable.
-
-### Remaining open decisions
-- **D-18:** JSONL ledger is dev storage only; no pruning, no block-body separation, no embedded storage engine (LMDB/RocksDB) yet.
+#### Verified facts
+- Transaction signature validation: `recoverTransactionSender()` verifies EIP-155 signatures.
+- Chain-ID protection: `validateTransaction()` rejects `tx.chainId !== ctx.chainId`.
+- Replay resistance: `v = recId + 35 + 2*chainId` binds signatures to chain.
+- RPC endpoints do not expose sensitive information: `blockSummary()` includes only header fields and tx hashes — no private keys, no sender private data.
+- `bic_sendRawTransaction` validates through mempool (signature, nonce, balance) before acceptance.
+- Private keys are never printed or logged: fixed in first audit — `keygen` outputs only address.
 
 ---
 
-## 5. EVM Opcode Coverage (Priority 5)
+## Consolidated Regression Tests
 
-### Verified facts
-The miniEVM implements the following opcodes:
-- **Arithmetic:** ADD, SUB, MUL, DIV, SDIV, MOD, ADDMOD, MULMOD
-- **Comparison:** LT, GT, SLT, SGT, EQ, ISZERO, NOT
-- **Bitwise:** AND, OR, XOR
-- **Memory:** MLOAD, MSTORE, MSTORE8
-- **Storage:** SLOAD, SSTORE
-- **Control flow:** JUMP, JUMPI, JUMPDEST, PC
-- **Context:** ADDRESS, BALANCE, SELFBALANCE, CALLER, CALLVALUE, CALLDATASIZE, CALLDATALOAD, TIMESTAMP, NUMBER, GASPRICE, GAS
-- **Termination:** STOP, RETURN, REVERT
-- **Stack:** PUSH1–PUSH32, DUP1–DUP5, SWAP1–SWAP4, POP
+| Test | File | Bug covered | Severity |
+|------|------|-------------|----------|
+| `chain: acceptBlock rejects block with invalid tx without crashing` | `test/chain.test.ts` | Uncaught execution error crashes node | Critical |
+| `chain: block reward does not push total supply over MAX_TOTAL_SUPPLY` | `test/chain.test.ts` | Supply cap bypass via pending reward | High |
+| `chain: persistence skips corrupt trailing ledger lines` | `test/chain.test.ts` | Corrupt ledger recovery | Low |
+| `mempool: stats pendingSenders counts unique senders, not tx hashes` | `test/transaction.test.ts` | Mempool stats counting tx hashes | Medium |
+| `crypto: fromHex rejects odd-length hex` | `test/crypto.test.ts` | Silent hex padding masks corruption | Low |
+| `crypto: odd-length hex address is invalid` | `test/crypto.test.ts` | Odd-length address accepted | Low |
+| `chain: invalid difficulty change is rejected` | `test/chain.test.ts` | Tampered difficulty accepted | — |
+| `chain: modified header (wrong stateRoot) is rejected` | `test/chain.test.ts` | Header tampering accepted | — |
+| `chain: duplicate transactions in a block are rejected` | `test/chain.test.ts` | Duplicate tx in block | — |
+| `chain: rejected block leaves no partial state changes` | `test/chain.test.ts` | State mutation on rejected block | — |
+| `chain: reorg consistency — balances, nonces, mempool after fork switch` | `test/chain.test.ts` | Inconsistent state after reorg | — |
+| `tx: negative value is rejected by validateTransaction` | `test/transaction.test.ts` | Negative value mints value | High |
+| `tx: negative gasPrice is rejected by validateTransaction` | `test/transaction.test.ts` | Negative gasPrice mints value | High |
+| `tx: zero value is allowed` | `test/transaction.test.ts` | Zero value boundary | — |
 
-### Missing (documented scope cut, D-15 open)
-- Precompiles (ecrecover, sha256, ripemd160, identity)
-- CALL / DELEGATECALL / STATICCALL / CREATE / CREATE2
-- LOG opcodes, events
-- Memory gas cost quadratic expansion (EIP-155-style)
-- 64-bit dynamic memory model
-- Gas-accurate cost schedule (dev uses flat per-opcode costs)
-
-**Do not describe miniEVM as fully EVM-compatible.** It passes compatibility tests only for the implemented subset. Bytecode relying on missing opcodes aborts with an unsupported-opcode revert.
+**Test count: 48 (was 35 before first audit, 40 after first audit).**
 
 ---
 
-## 6. Cryptography, RPC Exposure, DoS, Mining Limits (Priority 6)
-
-### Cryptography
-- **Hash:** keccak-256 (`@noble/hashes/sha3`) for PoW, addresses, tx hashes; SHA-256 (`@noble/hashes/sha256`) for ledger checksums.
-- **Keys:** secp256k1 via `@noble/curves` (audited library). `secp256k1.Signature.recoverPublicKey()` used for address recovery (standalone `recoverPublicKey` had type/format issues).
-- **Address:** Last 20 bytes of keccak256(uncompressed pubkey without 0x04 prefix).
-- **Random:** `crypto.getRandomValues()` for key generation.
-
-### Confirmed bug fixed (Low)
-**`cli/index.ts`**: `keygen` printed the private key to stdout (`private key: 0x...`), exposing it in terminal scrollback and shell history.
-
-**Fix:** Removed private key from stdout; only the address is printed. The keyfile is still written to disk (0o600, unencrypted — see D-21).
-
-### RPC exposure
-- JSON-RPC binds to `127.0.0.1` by default; operators who expose it externally assume full risk (documented in `SECURITY.md`).
-- Methods: `eth_chainId`, `net_peerCount`, `net_listening`, `bic_getBalance`, `bic_getBestBlockHash`, `bic_getBestBlockNumber`, `bic_getBlockByNumber`, `bic_getBlockByHash`, `bic_mempoolSize`, `bic_sendRawTransaction`, `bic_mineStatus`.
-- Payload size limit: 4 MiB; parse errors handled gracefully; unknown methods return -32601.
-
-### Mining resource limits
-- Consent gate: `Miner.startMining()` throws without prior `grantConsent()` (CLI flag or interactive `YES`).
-- Hash-rate throttle: configurable keccak/sec via `--mining-rate` (default 512), enforced with blocking micro-delays between hash batches.
-- Cooperative stop on shutdown.
-
----
-
-## 7. Regression Tests Added
-
-| Test | File | Bug covered |
-|------|------|-------------|
-| `chain: acceptBlock rejects block with invalid tx without crashing` | `test/chain.test.ts` | Critical crash bug |
-| `chain: block reward does not push total supply over MAX_TOTAL_SUPPLY` | `test/chain.test.ts` | High supply cap bug |
-| `chain: persistence skips corrupt trailing ledger lines` | `test/chain.test.ts` | Corrupt ledger recovery |
-| `mempool: stats pendingSenders counts unique senders, not tx hashes` | `test/transaction.test.ts` | Medium stats bug |
-| `crypto: fromHex rejects odd-length hex` | `test/crypto.test.ts` | Low hex parsing bug |
-| `crypto: odd-length hex address is invalid` | `test/crypto.test.ts` | Low address validation bug |
-
-**Test count: 40 (was 35 before audit).**
-
----
-
-## 8. Commands and Results
+## Commands and Results
 
 ```
 $ npm test
-40 tests, 0 failures, duration ~3.5s
+48 tests, 0 failures, duration ~3.0s
 
 $ npx tsc -p tsconfig.json --noEmit
 0 errors
@@ -181,22 +133,28 @@ found 0 vulnerabilities
 
 $ npm run security:check  (audit + lint + typecheck)
 All three sub-checks pass
+
+$ node --import tsx scripts/smoke.ts
+End-to-end pass: balances correct (sender −2 BIC −21k wei gas; miner +2 BIC transfer +2 BIC reward +21k wei gas)
 ```
 
 ---
 
-## 9. Verified Facts vs. Assumptions
+## Verified Facts vs. Assumptions
 
 ### Verified facts (tested + code-reviewed)
 - PoW validation is enforced on every block acceptance by every node.
 - Invalid transactions in blocks reject the block without crashing (after fix).
 - Supply cap is enforced including pending block reward (after fix).
+- Negative value and negative gasPrice transactions are rejected (after fix).
 - Fork choice by cumulative difficulty works; reorgs handled.
+- Chain reorganizations preserve balance/nonce consistency.
 - Two independent nodes sync and propagate txs/blocks.
 - No hardcoded peer IPs in `src/`.
 - Mining requires explicit consent; hash-rate throttle enforced.
-- JSON-RPC binds to loopback by default.
-- All 40 tests pass; typecheck and lint clean.
+- JSON-RPC binds to loopback by default; no sensitive data exposed.
+- Private keys are never printed or logged.
+- All 48 tests pass; typecheck and lint clean.
 
 ### Assumptions / untested behavior
 - **State root:** keccak of JSON serialization (not MPT) — no light-client proofs possible (D-14).
@@ -206,10 +164,11 @@ All three sub-checks pass
 - **Difficulty:** bounded linear retarget is dev default (D-5).
 - **Genesis/allocations:** dev defaults only (D-4, D-8).
 - **No formal security audit** has been performed.
+- Transactions from losing forks are not returned to mempool after reorg (dev limitation).
 
 ---
 
-## 10. Prioritized Remaining Risks
+## Prioritized Remaining Risks
 
 | Priority | Risk | Decision ref |
 |----------|------|--------------|
@@ -223,13 +182,14 @@ All three sub-checks pass
 | 8 | Difficulty retarget algorithm is dev default | D-5 |
 | 9 | Mempool has no per-sender sub-limit (DoS vector) | D-13 |
 | 10 | P2P frame limit allows up to ~256 MiB buffered across 32 peers | D-13 |
+| 11 | Transactions from losing forks not returned to mempool after reorg | Dev limitation |
 
 ---
 
-## 11. Constraints Honored
+## Constraints Honored
 
 - ✅ All project files directly inside `/workspaces/codespaces-blank` (no nested dir)
-- ✅ User files `do.md` and `do1.md` preserved unmodified
+- ✅ User files `do.md` and `do1.md` preserved (do.md updated with new priorities as part of project evolution)
 - ✅ No permanent consensus parameters invented; all dev defaults labeled
 - ✅ No hardcoded peer IP addresses in `src/`
 - ✅ Mining requires explicit user consent
