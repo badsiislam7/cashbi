@@ -120,7 +120,7 @@ This mints value out of thin air. Fix: added `if (tx.value < 0n) throw new Error
 
 ```
 $ npm test
-48 tests, 0 failures, duration ~3.0s
+49 tests, 0 failures, duration ~13s (48 unit + 1 integration)
 
 $ npx tsc -p tsconfig.json --noEmit
 0 errors

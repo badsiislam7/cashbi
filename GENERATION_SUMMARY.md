@@ -3,7 +3,7 @@
 **Workspace:** `/workspaces/codespaces-blank`
 **Project:** CashBI — independent Layer 1 Proof-of-Work cryptocurrency (native coin ticker BIC), EVM-compatible execution, decentralized P2P networking, TypeScript/Node.js.
 **Status:** Development build (NOT production-ready); all work committed locally, nothing pushed/deployed.
-**Total commits:** 6 on branch `main` (`7d5df5a` initial, `e616c87` first audit fixes, `28c8544` first audit report, `255a1ae` generation summary regen, `2f5f2c7` second audit fixes)
+**Total commits:** 8 on branch `main` (`7fbff1f` initial, `e616c87` first audit fixes, `28c8544` first audit report, `255a1ae` generation summary regen, `2f5f2c7` second audit fixes, `b63e412` integration test, `86bf171` docs update, `5982907` process-leak test fix)
 
 **Second audit complete:** The updated `do.md` calls for a deeper consensus and economic-security audit. This added:
 - 2 high-severity bug fixes (negative value and negative gasPrice value creation)
@@ -155,15 +155,16 @@ Notable passing tests:
 ## 5. Git
 
 - `git init` run in `/workspaces/codespaces-blank`
-- Branch `main`, 6 commits:
-  - `7d5df5a` — CashBI initial commit: Layer 1 PoW blockchain (BIC)
-  - `e616c87` — first audit: fix confirmed bugs and add regression tests
+- Branch `main`, 8 commits:
+  - `7fbff1f` — docs: add generation summary of all generated project files
+  - `e616c87` — audit: fix confirmed bugs and add regression tests
   - `28c8544` — docs: add adversarial technical audit report
   - `255a1ae` — docs: regenerate generation summary with complete workspace record
   - `2f5f2c7` — second audit: consensus and economic-security fixes
   - `b63e412` — integration: add real two-node testnet integration test
-  - `b63e412` — integration: add real two-node testnet integration test
-- Working tree clean
+  - `86bf171` — docs: update audit report and generation summary with integration test defect fix
+  - `5982907` — test: fix process leak in integration test on assertion failure
+- Working tree clean (except `do.md`, which was modified by the system as part of task handoff)
 - **No remote configured, nothing pushed** (per user instruction)
 
 ---
