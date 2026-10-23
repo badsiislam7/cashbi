@@ -3,8 +3,10 @@
 **Workspace:** `/workspaces/codespaces-blank`
 **Project:** CashBI — independent Layer 1 Proof-of-Work cryptocurrency (native coin ticker BIC), EVM-compatible execution, decentralized P2P networking, TypeScript/Node.js.
 **Status:** Development build (NOT production-ready); all work committed locally, nothing pushed/deployed.
-**Total commits:** 23 on branch `main` (HEAD: `1c35b1d`)
+**Total commits:** 24 on branch `main` (HEAD: `21b8155`)
 **Working tree:** clean except `do.md` (modified externally by task handoff, uncommitted) and `GENERATION_SUMMARY.md` (modified, uncommitted)
+
+> **Note on commit count accuracy:** GENERATION_SUMMARY.md documents the git commit count, but committing GENERATION_SUMMARY.md itself changes that count. The count above is accurate as of HEAD `21b8155` (24 commits). After this file is committed, the count will be one higher — this is a self-referential limitation inherent to documenting the repository's own state within the repository.
 
 ---
 
@@ -166,6 +168,7 @@ CashBI is a real blockchain implementation (not a token, dashboard, or mock) con
 **Commit History (most recent first):**
 | SHA | Message |
 |---|---|
+| `21b8155` | docs: correct commit count to 23 with accurate HEAD SHA |
 | `69ca8c2` | docs: correct commit count to 21 with accurate HEAD SHA |
 | `1ada1bf` | docs: correct commit count to 20 with accurate HEAD SHA |
 | `edf5d77` | docs: correct commit count to 19 with accurate HEAD SHA |
