@@ -4,7 +4,7 @@ import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isMiningCandidate } from "../src/consensus/pow.js";
-import { BIC, DEV_CHAIN_ID, BLOCK_REWARD, MAX_TOTAL_SUPPLY } from "../src/config/params.js";
+import { BIC, DEV_CHAIN_ID, BLOCK_REWARD, MAX_FUTURE_TIMESTAMP_SECONDS, MAX_TOTAL_SUPPLY, MIN_DIFFICULTY } from "../src/config/params.js";
 import { Blockchain } from "../src/chain/blockchain.js";
 import { buildBlockForMining, buildBlockOn } from "../src/mining/candidate.js";
 import { emptyGenesisConfig } from "../src/chain/genesis.js";
@@ -20,10 +20,10 @@ interface ChainSet {
   miner: ReturnType<typeof randomAccount>;
 }
 
-function fundedChain(): ChainSet {
+function fundedChain(genesisTs = Math.floor(1_700_000_000)): ChainSet {
   const user = randomAccount();
   const miner = randomAccount();
-  const genesis = emptyGenesisConfig(Math.floor(1_700_000_000));
+  const genesis = emptyGenesisConfig(genesisTs);
   genesis.allocations = [{ address: user.address, balance: BIC(10_000n) }];
   const chain = new Blockchain(genesis);
   const mempool = new Mempool();
@@ -108,22 +108,27 @@ test("chain: accepts a validated mined block; coinbase reward + supply conservat
   assert.equal(chain.tipState.totalSupply(), genesisSupply + BLOCK_REWARD);
 });
 
-test("chain: rejects tampered blocks (txRoot mismatch, orphan, stale timestamp)", () => {
+test("chain: rejects orphan blocks; equal timestamp is now valid (non-decreasing rule)", () => {
   const { chain, mempool, miner } = fundedChain();
   const tip = chain.tip;
   // Orphan block (unknown parent)
   const orphan = { ...tip.block, header: { ...tip.block.header, parentHash: "0x" + "10".repeat(32) } };
   assert.equal(chain.acceptBlock(orphan).accepted, false);
-  // Stale timestamp (same as parent's)
+  // Equal timestamp (stale under the OLD strict-increase rule) now builds a
+  // valid candidate and is accepted: Phase 1 permits equal stamps.
   const template = buildBlockForMining({
     chain,
     mempool,
     coinbase: miner.address,
     timestamp: tip.block.header.timestamp,
     activeReward: BLOCK_REWARD,
-    extraData: new TextEncoder().encode("stale"),
+    extraData: new TextEncoder().encode("equal-stamp"),
   });
-  assert.equal(template, null);
+  assert.notEqual(template, null, "equal-stamp candidate must be buildable under the non-decreasing rule");
+  const receipt = chain.acceptBlock(findNonce(template!));
+  assert.equal(receipt.accepted, true, receipt.reason);
+  assert.equal(chain.tip.number, 1);
+  assert.equal(chain.tip.block.header.timestamp, tip.block.header.timestamp, "block timestamp equals its parent's");
 });
 
 test("chain: txRoot mismatch rejects block with unclean header", () => {
@@ -414,6 +419,61 @@ test("chain: modified header (wrong stateRoot) is rejected", () => {
   assert.match(receipt.reason ?? "", /stateRoot/);
 });
 
+test("chain: local-clock future limit behavior unchanged (rejects beyond-wall stamps reached via legal +30 steps)", () => {
+  // Genesis sits 290 s in the past so a parent-relative ladder of +30 s steps
+  // reaches the wall-clock tolerance in 19 accepted blocks; the 20th (again
+  // parent+30) satisfies the deterministic parent-relative rules but violates
+  // the pre-existing local-clock policy and must still be rejected here
+  // (quarantine is a later phase, out of scope).
+  const { chain, mempool, miner } = fundedChain(Math.floor(Date.now() / 1000) - 290);
+  let tip = chain.tip.block.header;
+  for (let i = 0; i < 19; i++) {
+    const template = buildBlockForMining({
+      chain,
+      mempool,
+      coinbase: miner.address,
+      timestamp: tip.timestamp + 30,
+      activeReward: BLOCK_REWARD,
+      extraData: new TextEncoder().encode(`ladder-${i}`),
+    })!;
+    const mined = findNonce(template);
+    const receipt = chain.acceptBlock(mined);
+    assert.equal(receipt.accepted, true, `ladder block ${i}: ${receipt.reason}`);
+    tip = chain.tip.block.header;
+  }
+  assert.equal(tip.timestamp <= Math.floor(Date.now() / 1000) + MAX_FUTURE_TIMESTAMP_SECONDS, true, "precondition: last ladder stamp within the local tolerance");
+  const beyond = buildBlockForMining({
+    chain,
+    mempool,
+    coinbase: miner.address,
+    timestamp: tip.timestamp + 30,
+    activeReward: BLOCK_REWARD,
+    extraData: new TextEncoder().encode("beyond-wall"),
+  })!;
+  const minedBeyond = findNonce(beyond);
+  const receipt = chain.acceptBlock(minedBeyond);
+  assert.equal(receipt.accepted, false, "block beyond the local-clock future tolerance must be rejected");
+  assert.match(receipt.reason ?? "", /timestamp too far in the future/);
+});
+
+test("chain: block with timestamp within max future is accepted", () => {
+  // Genesis placed near wall time so the +30 s parent-relative cap and the
+  // local future tolerance both hold for the candidate stamp.
+  const { chain, mempool, miner } = fundedChain(Math.floor(Date.now() / 1000) - 25);
+  const template = buildBlockForMining({
+    chain,
+    mempool,
+    coinbase: miner.address,
+    timestamp: chain.tip.block.header.timestamp + 30, // = wall +5, inside the future tolerance
+    activeReward: BLOCK_REWARD,
+    extraData: new TextEncoder().encode("near-future"),
+  })!;
+  assert.equal(template!.header.timestamp <= Math.floor(Date.now() / 1000) + MAX_FUTURE_TIMESTAMP_SECONDS, true);
+  const mined = findNonce(template);
+  const receipt = chain.acceptBlock(mined);
+  assert.equal(receipt.accepted, true, "block with timestamp within max future should be accepted");
+});
+
 test("chain: duplicate transactions in a block are rejected", () => {
   const { chain, mempool, user, miner } = fundedChain();
   const payee = randomAccount();
@@ -470,4 +530,77 @@ test("chain: rejected block leaves no partial state changes", () => {
   assert.equal(chain.tipState.getAccount(user.address)?.balance, balanceBefore, "balance unchanged after rejection");
   assert.equal(chain.tipState.getAccount(user.address)?.nonce, nonceBefore, "nonce unchanged after rejection");
   assert.equal(chain.tip.number, 0, "tip unchanged after rejection");
+});
+
+test("chain: parent-relative stamps — exactly +30 accepted, +31 rejected, earlier rejected", () => {
+  const { chain, mempool, miner } = fundedChain();
+  const build = (ts: number, tag: string) =>
+    buildBlockForMining({
+      chain,
+      mempool,
+      coinbase: miner.address,
+      timestamp: ts,
+      activeReward: BLOCK_REWARD,
+      extraData: new TextEncoder().encode(tag),
+    })!;
+
+  // +30 accepted by the deterministic parent-relative rule.
+  const at30 = build(chain.tip.block.header.timestamp + 30, "step30");
+  const at30Receipt = chain.acceptBlock(findNonce(at30));
+  assert.equal(at30Receipt.accepted, true, `parent+30 must be accepted: ${at30Receipt.reason}`);
+
+  // +31 rejected on the next block (parent is the +30 block).
+  const tipTs = chain.tip.block.header.timestamp;
+  const manualLate = build(tipTs + 31, "step31");
+  const lateHeader = { ...manualLate.header, timestamp: tipTs + 31 };
+  const lateMined = findNonce({ header: lateHeader, transactions: manualLate.transactions });
+  const lateReceipt = chain.acceptBlock(lateMined);
+  assert.equal(lateReceipt.accepted, false, "parent+31 must be rejected");
+  assert.match(lateReceipt.reason ?? "", /after parent/);
+
+  // Earlier than parent rejected.
+  const earlyHeader = { ...manualLate.header, timestamp: tipTs - 1 };
+  const earlyMined = findNonce({ header: earlyHeader, transactions: manualLate.transactions });
+  const earlyReceipt = chain.acceptBlock(earlyMined);
+  assert.equal(earlyReceipt.accepted, false, "earlier-than-parent must be rejected");
+  assert.match(earlyReceipt.reason ?? "", /earlier than parent/);
+});
+
+test("chain: non-retarget heights inherit the parent difficulty", () => {
+  const { chain, mempool, miner } = fundedChain();
+  const gTs = chain.tip.block.header.timestamp;
+  const receipt = mineAndSubmit(chain, mempool, miner.address, gTs + 5);
+  assert.equal(receipt.accepted, true, receipt.reason);
+  assert.equal(chain.tip.block.header.difficulty, chain.getBlockByNumber(0)!.header.difficulty);
+
+  // Non-retarget heights must not consult anchors at all: a throwing lookup
+  // proves the retarget path is skipped (and inheritance is exact).
+  const template = buildBlockForMining({
+    chain,
+    mempool,
+    coinbase: miner.address,
+    timestamp: gTs + 10,
+    activeReward: BLOCK_REWARD,
+    extraData: new TextEncoder().encode("inherit"),
+  });
+  assert.notEqual(template, null);
+  assert.equal(template!.header.difficulty, BigInt(1), "inherited difficulty equals the genesis difficulty");
+});
+
+test("chain: 60 equal-stamp blocks RAISE difficulty at the first retarget (regression)", () => {
+  const { chain, mempool, miner } = fundedChain();
+  const gTs = chain.tip.block.header.timestamp;
+  // Under the old strictly-increasing rule this was impossible: equal stamps
+  // were rejected outright. Under the non-decreasing rule all 60 blocks carry
+  // the genesis second; the first retarget measures elapsed = 5 (virtual
+  // bootstrap anchors at h−9..h−1 give LM(old) = G−5, LM(new) = G), clamps to
+  // 15, and difficulty rises 1 -> MIN_DIFFICULTY.
+  for (let hCheck = 1; hCheck <= 60; hCheck++) {
+    const receipt = mineAndSubmit(chain, mempool, miner.address, gTs);
+    assert.equal(receipt.accepted, true, `block ${hCheck}: ${receipt.reason}`);
+  }
+  assert.equal(chain.tip.number, 60);
+  const finalDifficulty = chain.tip.block.header.difficulty;
+  assert.equal(finalDifficulty, BigInt(MIN_DIFFICULTY), "equal-stamp window must raise difficulty (clamped to MIN)");
+  assert.equal(finalDifficulty > 1n, true, "regression: equal-second blocks cause a real difficulty increase");
 });

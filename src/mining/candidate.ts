@@ -18,7 +18,7 @@ import type { Mempool } from "../tx/mempool.js";
 import { Journal } from "../state/world.js";
 import { sortTransactions, txHash as txHashOf, recoverTransactionSender, type Transaction } from "../tx/transaction.js";
 import { nextDifficulty } from "../consensus/pow.js";
-import { MAX_BLOCK_GAS } from "../config/params.js";
+import { DIFFICULTY_RETARGET_INTERVAL, MAX_BLOCK_GAS, MAX_TIMESTAMP_STEP_SECONDS } from "../config/params.js";
 import { TransactionExecutor } from "../tx/execute.js";
 import type { WorldState as RealWorldState } from "../state/world.js";
 
@@ -59,14 +59,30 @@ export function buildBlockOn(
   const state0 = parent.parentState;
   if (!state0 || typeof (state0 as WorldStateLike).clone !== "function") return null;
   const parentState = state0 as WorldStateLike;
+  const parentTs = parent.parentBlock.header.timestamp;
 
-  const difficulty = nextDifficulty(
-    parent.parentBlock.header.difficulty,
-    parent.parentBlock.header.number,
-    parent.parentBlock.header.timestamp,
-    input.timestamp,
-  );
-  if (input.timestamp <= parent.parentBlock.header.timestamp) return null;
+  // Parent-relative stamp policy for locally built candidates. The miner
+  // supplies a wall-clock suggestion (floor(now/1000)); the template clamps
+  // it into the consensus range [parentTs, parentTs + MAX_TIMESTAMP_STEP_SECONDS]:
+  //  - normally the suggestion already satisfies the range (wall clock has
+  //    passed the parent's stamp), so behavior is unchanged;
+  //  - when chain lags wall clock by >30 s (e.g. an old dev genesis
+  //    timestamp), every candidate deterministically advances chain time by
+  //    the maximum +30 s step (equal stamps keep the slow case working too).
+  const timestamp = Math.min(Math.max(input.timestamp, parentTs), parentTs + MAX_TIMESTAMP_STEP_SECONDS);
+
+  let difficulty: bigint;
+  try {
+    difficulty = nextDifficulty(
+      parent.parentBlock.header.difficulty,
+      parent.parentBlock.header.number,
+      timestamp,
+      branchTimestampLookup(input.chain, parent.parentBlock, parent.parentBlock.header.number + 1, timestamp),
+    );
+  } catch {
+    // Retarget anchor history unavailable on this branch -> no template.
+    return null;
+  }
 
   // Greedy fee-sorted selection with per-sender nonce sequencing.
   const state = parentState.clone();
@@ -91,7 +107,7 @@ export function buildBlockOn(
         chainId: input.chain.chainId,
         coinbase: input.coinbase,
         blockNumber: parent.parentBlock.header.number + 1,
-        blockTimestamp: input.timestamp,
+        blockTimestamp: timestamp,
       });
       senderProgress.set(sender, tx.nonce + 1n);
       gasUsedTotal += receipt.gasUsed;
@@ -112,7 +128,7 @@ export function buildBlockOn(
   const header: BlockHeader = {
     parentHash: parent.parentHash,
     number: parent.parentBlock.header.number + 1,
-    timestamp: input.timestamp,
+    timestamp,
     difficulty,
     coinbase: input.coinbase,
     extraData: input.extraData,
@@ -123,6 +139,43 @@ export function buildBlockOn(
     nonce: 0n,
   };
   return { header, transactions: chosen };
+}
+
+/**
+ * Branch-aware anchor lookup for template building (mirrors Blockchain's
+ * retarget rule): walks parent hashes from the mining parent, synthesizes
+ * heights < 0 from the genesis timestamp, and resolves height h to the
+ * candidate stamp. Understands the genesis manifest's timestamp; throws if a
+ * needed real block is unavailable so the caller can bail out cleanly.
+ */
+function branchTimestampLookup(
+  chain: Blockchain,
+  parentBlock: Block,
+  retargetHeight: number,
+  candidateTimestamp: number,
+): (height: number) => number {
+  if ((parentBlock.header.number + 1) % DIFFICULTY_RETARGET_INTERVAL !== 0) {
+    // Non-retarget height: nextDifficulty ignores the lookup; fail loudly if
+    // it is ever consulted by mistake.
+    return (height) => {
+      throw new Error(`height ${height} is not a retarget anchor (non-retarget height)`);
+    };
+  }
+  const genesisTimestamp = chain.genesis.genesisTimestamp;
+  const branchTs = new Map<number, number>();
+  let cursor: Block | null = parentBlock;
+  while (cursor && cursor.header.number >= retargetHeight - 69) {
+    branchTs.set(cursor.header.number, cursor.header.timestamp);
+    if (cursor.header.number === 0) break;
+    cursor = chain.getBlock(cursor.header.parentHash)?.block ?? null;
+  }
+  return (height: number): number => {
+    if (height < 0) return genesisTimestamp + height;
+    if (height === retargetHeight) return candidateTimestamp;
+    const ts = branchTs.get(height);
+    if (ts === undefined) throw new Error(`no block on this branch at anchor height ${height}`);
+    return ts;
+  };
 }
 
 interface WorldStateLike {

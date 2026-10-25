@@ -121,8 +121,13 @@ export class Miner {
         this.rounds += 1;
         this.options.onMinedBlock?.(mined);
       }
-      // Re-derive templates when the tip moved or tx set changed.
-      await sleep(0);
+      // Re-derive templates when the tip moved or tx set changed. Equal-stamp
+      // consensus rules make a candidate template available every iteration,
+      // so yield a real wall-clock slice here: without it the loop hot-spins,
+      // stamping same-second blocks as fast as trivial difficulty allows and
+      // starving the event loop. 250 ms keeps dev block production
+      // wall-clock-sensible (the null-candidate path below already uses it).
+      await sleep(250);
     }
   }
 

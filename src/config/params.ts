@@ -32,8 +32,17 @@ export const DEV_CHAIN_ID = 901291;
 export const GENESIS_DIFFICULTY = 1; // effectively instant mining for dev chains
 export const TARGET_BLOCK_TIME_SECONDS = 1; // dev: sub-minute stragglers OK
 export const DIFFICULTY_RETARGET_INTERVAL = 60; // blocks between retargets
-export const MIN_DIFFICULTY = 1;
+/** Difficulty floor: Phase 1 retarget clamp bound (approved value 1024 = 2^10;
+ *  decision D-8 open). NOTE: GENESIS_DIFFICULTY (1) is intentionally below this
+ *  floor until the separate genesis-recalibration phase; pre-first-retarget
+ *  blocks inherit it and every retarget result is clamped up to this bound. */
+export const MIN_DIFFICULTY = 1024;
 export const MAX_DIFFICULTY = 4_294_967_295; // dev cap to keep mining bounded
+
+/** Maximum seconds a block timestamp may exceed its PARENT's timestamp
+ *  (parent-relative bound, Phase 1 consensus rule). Equal timestamps are
+ *  permitted; 30 s after the parent is valid, 31 s is rejected. */
+export const MAX_TIMESTAMP_STEP_SECONDS = 30;
 
 /** Coinbase block reward: dev default, subject to decision D-1 (issuance). */
 export const BLOCK_REWARD = BIC(2n);
@@ -55,6 +64,13 @@ export const DEFAULT_RPC_PORT = 8_545;
 export const MAX_PEERS = 32;
 export const MAX_PENDING_PEERS = 96;
 export const P2P_FRAME_LIMIT_BYTES = 8 * 1024 * 1024;
+
+/** Maximum number of seconds a block's timestamp may exceed its parent's timestamp.
+ *  Prevents a miner from setting a block timestamp arbitrarily far in the future,
+ *  which would artificially inflate the elapsed time used in difficulty retargeting
+ *  and cause difficulty to drop. A value of 300 seconds (5 minutes) provides
+ *  reasonable tolerance for clock skew while preventing timestamp manipulation. */
+export const MAX_FUTURE_TIMESTAMP_SECONDS = 300;
 
 /**
  * Peer discovery is operator-configured: DNS seed hostnames, HTTPS discovery

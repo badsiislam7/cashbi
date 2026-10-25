@@ -17,8 +17,8 @@ import type { Transaction } from "../tx/transaction.js";
 import { recoverTransactionSender, validateTransaction, txHash } from "../tx/transaction.js";
 import { Journal, WorldState } from "../state/world.js";
 import { TransactionExecutor, type ExecutionContext, type TxExecutionReceipt } from "../tx/execute.js";
-import { nextDifficulty, verifyHeaderPoW } from "../consensus/pow.js";
-import { BLOCK_REWARD, MAX_BLOCK_BYTES, MAX_TOTAL_SUPPLY, MAX_PENDING_BLOCKS } from "../config/params.js";
+import { nextDifficulty, verifyHeaderPoW, virtualAnchorTimestamp } from "../consensus/pow.js";
+import { BLOCK_REWARD, DIFFICULTY_RETARGET_INTERVAL, MAX_BLOCK_BYTES, MAX_FUTURE_TIMESTAMP_SECONDS, MAX_TIMESTAMP_STEP_SECONDS, MAX_TOTAL_SUPPLY, MAX_PENDING_BLOCKS } from "../config/params.js";
 import { isValidAddress } from "../crypto/keys.js";
 import { appendLedger, readLedger } from "./persist.js";
 import { buildGenesis, type GenesisConfig, type GenesisManifest, genesisManifest } from "./genesis.js";
@@ -166,18 +166,41 @@ export class Blockchain {
     if (block.header.number !== parent.block.header.number + 1) {
       return reject(`height ${block.header.number} does not follow parent height ${parent.block.header.number}`);
     }
-    if (block.header.timestamp <= parent.block.header.timestamp) {
-      return reject("timestamp must strictly increase");
+    // Parent-relative deterministic timestamp rules: stamps may not move
+    // backwards and may advance the parent's timestamp by at most
+    // MAX_TIMESTAMP_STEP_SECONDS. Equal timestamps are explicitly valid.
+    if (block.header.timestamp < parent.block.header.timestamp) {
+      return reject("timestamp earlier than parent");
+    }
+    if (block.header.timestamp > parent.block.header.timestamp + MAX_TIMESTAMP_STEP_SECONDS) {
+      return reject("timestamp more than MAX_TIMESTAMP_STEP_SECONDS seconds after parent");
+    }
+    // Pre-existing local-clock acceptance policy, unchanged in this phase:
+    // blocks stamped beyond the local future tolerance are rejected here.
+    // (A future phase replaces this with quarantine; out of scope below.)
+    if (block.header.timestamp > Math.floor(Date.now() / 1000) + MAX_FUTURE_TIMESTAMP_SECONDS) {
+      return reject("timestamp too far in the future");
     }
     const pow = verifyHeaderPoW(block.header, { nonce: block.header.nonce });
     if (!pow.ok) return reject(pow.reason);
 
-    const expectedDifficulty = nextDifficulty(
-      parent.block.header.difficulty,
-      parent.block.header.number,
-      parent.block.header.timestamp,
-      block.header.timestamp,
-    );
+    // Difficulty retarget: anchors come from THIS branch (the parent chain the
+    // block extends), never from the canonical tip. The new sample includes
+    // the block being validated (height h); heights below zero at the first
+    // retarget are virtual anchors derived from the genesis header timestamp
+    // (see pow.virtualAnchorTimestamp) — not real blocks and not consulted by
+    // any other rule.
+    let expectedDifficulty: bigint;
+    try {
+      expectedDifficulty = nextDifficulty(
+        parent.block.header.difficulty,
+        parent.block.header.number,
+        block.header.timestamp,
+        this.branchTimestampLookup(parent, block.header.number, block.header.timestamp),
+      );
+    } catch (err) {
+      return reject(`retarget anchor data unavailable: ${(err as Error).message}`);
+    }
     if (block.header.difficulty !== expectedDifficulty) {
       return reject(`difficulty ${block.header.difficulty} != retargeted ${expectedDifficulty}`);
     }
@@ -257,6 +280,43 @@ export class Blockchain {
       for (const txHashKnown of known) this.mempoolRef.remove(txHashKnown as string);
     }
     return { ...this.tipInfo(), reorganized, accepted: true };
+  }
+
+  /**
+   * Builds a timestamp lookup over the branch that ends at `parent` (the
+   * block's parent), covering retarget anchor heights [h-69, h-1]. Heights
+   * below zero (first retarget only) are virtual anchors derived from the
+   * genesis header timestamp; height h resolves to the block being validated.
+   * The walk follows parent hashes — never the canonical best chain — so a
+   * fork block is retargeted with its own branch's history.
+   */
+  private branchTimestampLookup(
+    parent: ChainIndexEntry,
+    blockHeight: number,
+    blockTimestamp: number,
+  ): (height: number) => number {
+    if ((parent.block.header.number + 1) % DIFFICULTY_RETARGET_INTERVAL !== 0) {
+      // Non-retarget heights never consult anchors; keep the lookup strict
+      // anyway so accidental use fails loudly instead of reading wrong data.
+      return (height) => {
+        throw new Error(`height ${height} is not a retarget anchor (non-retarget height)`);
+      };
+    }
+    const genesisTimestamp = this.config.timestamp; // genesis header timestamp source
+    const branchTs = new Map<number, number>();
+    let cursor: ChainIndexEntry | undefined = parent;
+    while (cursor && cursor.block.header.number >= blockHeight - 69) {
+      branchTs.set(cursor.block.header.number, cursor.block.header.timestamp);
+      if (cursor.block.header.number === 0) break;
+      cursor = this.byHash.get(cursor.block.header.parentHash);
+    }
+    return (height: number): number => {
+      if (height < 0) return virtualAnchorTimestamp(height, genesisTimestamp);
+      if (height === blockHeight) return blockTimestamp;
+      const ts = branchTs.get(height);
+      if (ts === undefined) throw new Error(`no block on this branch at anchor height ${height}`);
+      return ts;
+    };
   }
 
   private execute(
