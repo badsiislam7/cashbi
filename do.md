@@ -1,108 +1,84 @@
-# CashBI — Audit and Isolate the Test-Only PoW Bypass
-
-## Objective
-
-Audit and repair the PoW validation bypass introduced during the previous test-repair task. Ensure that production block-import and P2P paths can never accidentally bypass proof-of-work validation, while keeping the test suite fast and deterministic.
+# CashBI — Complete PoW Test Isolation and Valid-Header Verification
 
 Repository: `/workspaces/codespaces-blank`
 
-## 1. Inspect Before Editing
+## Objective
 
-Inspect the current working tree and the exact implementations of:
+Address the remaining security and test-coverage gaps identified in the 2026-10-28 PoW audit report.
 
-- `src/chain/blockchain.ts`
-- `src/consensus/pow.ts`
-- `src/mining/miner.ts`
-- `src/net/server.ts`
-- `test/pow.test.ts`
-- `test/chain.test.ts`
-- `test/node.test.ts`
-- `test/integration-two-nodes.test.ts`
+### 1. Inspect the Actual API Boundary
 
-Search for every occurrence of `skipPoWValidation`, `acceptBlock`, `tryImport`, and every P2P block-reception handler.
+Inspect `src/chain/blockchain.ts` and all callers of `acceptBlockForTesting()`, `tryImport()`, and `acceptBlock()`.
 
-Preserve all existing user changes. Do not reset, clean, stash, revert, or overwrite unrelated modifications.
+The current report says `acceptBlockForTesting()` is a method on the production `Blockchain` class. Do not assume that naming or documentation makes it inaccessible to production callers.
 
-## 2. Remove the Production Bypass
+Determine whether ordinary production code can invoke this method.
 
-Remove `skipPoWValidation` from the public production `acceptBlock()` API and from any production import API that can bypass PoW.
+### 2. Truly Isolate Test-Only PoW Bypass
 
-Production block imports must always verify the header PoW. This requirement applies to every ordinary block-import path, including externally received P2P blocks.
+Remove the test bypass from the public production API surface.
 
-If tests need to bypass PoW for testing other validation rules, isolate that capability in a clearly test-only fixture or helper that production node and networking code cannot accidentally invoke.
+Use a safe design such as a test-only fixture, injected validation dependency restricted to test construction, or another architecture that ensures production node, RPC, mining, ledger-recovery, and P2P code cannot accidentally disable PoW.
 
-Do not merely rename the bypass flag or leave an equivalent public production bypass.
+Do not merely rename the bypass method.
 
-If the project architecture cannot safely isolate this test-only behavior without a larger redesign, stop and report the blocker rather than weakening production validation.
+Production block import must always perform actual PoW verification.
 
-## 3. Add Deterministic PoW Acceptance and Rejection Tests
+Keep tests for unrelated chain-validation rules fast without weakening production consensus.
 
-Add or retain tests that demonstrate all of the following:
+If genuine isolation requires a larger architectural change, stop and report the smallest safe design rather than introducing an insecure workaround.
 
-- A known, independently verified valid PoW header is accepted by the normal production validation path.
-- An invalid nonce/header is rejected by the normal production block-import path.
-- P2P-received blocks cannot bypass PoW validation.
-- Existing difficulty, target-boundary, target-exceeded, and invalid-difficulty tests remain intact.
+### 3. Add a Precomputed Valid-PoW Test Vector
 
-Use a precomputed valid PoW test vector with its exact header fields, nonce, digest, target, and expected result documented. Verify the vector using the actual consensus implementation and, where practical, an independent calculation or verification script.
+The current tests prove that an invalid nonce is rejected, but do not prove that a valid block passes the normal production `acceptBlock()` path.
 
-Do not run billions of hashes in unit tests. Do not claim that nonce `0` is valid without verifying the complete header against the actual target.
+Add a deterministic, precomputed valid-PoW header fixture containing:
+- Exact header fields and encoding.
+- Exact nonce.
+- Exact computed PoW digest.
+- Exact difficulty and target.
+- Expected verification result.
 
-## 4. Repair Integration-Test Coverage
+Verify the vector against the actual consensus implementation and independently reproduce the digest/target comparison where practical.
 
-The current integration test verifies startup, handshake, transaction submission, restart recovery, reconnection, and mismatched-genesis rejection. It does not currently prove actual block propagation.
+Do not perform billions of hashes during unit tests. Do not fabricate a valid nonce or treat the Genesis nonce as valid without verification.
 
-Update the tests so their claims match what they exercise.
+Use the vector to test the ordinary production PoW verification path. If a complete valid block is required to test `acceptBlock()`, construct one whose remaining consensus fields and state transitions are also valid.
 
-Where feasible, test actual block propagation between two nodes using a deterministic valid PoW fixture or a test network configuration that does not alter production consensus parameters.
+If a valid fixture cannot be produced within the task, document the blocker accurately and do not claim valid-PoW acceptance coverage.
 
-Any test-only fixture or network configuration must be isolated from production defaults and must not silently introduce a consensus bypass.
+### 4. P2P Coverage
 
-Verify that the receiving node validates the block through its normal production P2P import path.
+Do not claim actual block propagation coverage unless a block is sent through the real P2P reception path and accepted by the receiving node's normal production validation path.
 
-If genuine propagation cannot be tested safely within this task, clearly document the gap and do not claim propagation coverage.
+If feasible, use the valid fixture to test successful propagation and an invalid fixture to test rejection. Otherwise, retain an explicit documented coverage gap.
 
-## 5. Preserve Consensus Decisions
+### 5. Preserve Consensus and Repository State
 
 Do not change:
-
-- `POW_LIMIT` or its compact representation.
-- The PoW hash construction or byte order.
-- Difficulty calculation or retarget rules.
-- Chain ID `901291`.
-- Maximum supply of `16,000,000 BIC`.
-- Block reward or halving policy.
+- `POW_LIMIT` or PoW hash construction.
+- Difficulty or retarget rules.
+- Chain ID, supply, rewards, or halving policy.
 - Genesis fields, nonce, or hash.
-- `DEV_PARAM_VERSION`.
-- Handshake compatibility rules.
+- `DEV_PARAM_VERSION` or handshake rules.
 
-Do not mine Genesis, update Genesis hashes, activate new consensus parameters, or undertake unrelated consensus redesign.
+Do not mine Genesis, activate parameters, commit, push, deploy, or perform destructive Git operations.
 
-Do not introduce a production fast-PoW mode or weaken validation to make tests pass.
+Preserve all existing modifications and untracked files.
 
-## 6. Verify
+### 6. Verify and Report
 
-Run and report the actual results of:
+Run:
+- Focused PoW tests.
+- Chain tests.
+- Node and integration tests.
+- Full `npm test`.
+- `npx tsc --noEmit`.
+- `npm run lint`.
+- `npm run security:check`.
 
-1. Focused PoW tests.
-2. Chain tests.
-3. Node and two-node integration tests.
-4. Full `npm test`.
-5. `npx tsc --noEmit`.
-6. `npm run lint`.
-7. `npm run security:check`.
+Inspect the final diff and search for every remaining PoW bypass. Report whether the test bypass is genuinely inaccessible through production APIs, whether valid PoW acceptance was tested, and whether actual P2P block propagation was exercised.
 
-Inspect the final diff and search again for all PoW bypasses. Confirm that no production API or network path can disable PoW validation.
-
-Report separately:
-- Tests that genuinely exercise production PoW validation.
-- Tests that use isolated test fixtures.
-- Whether actual P2P block propagation was tested.
-- Any remaining limitations.
-- All modified and untracked files.
-
-Do not commit, push, deploy, or perform destructive Git operations. Preserve the current working tree and all pre-existing changes.
-
-Stop after this audit and repair task.
+Stop after this task.
 
 Once finished, create a new .md file containing a comprehensive, detailed report of everything that has been accomplished.

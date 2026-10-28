@@ -12,7 +12,7 @@
  * - Persistence is an append-only JSONL ledger of canonical encodings.
  */
 import type { Block } from "./block.js";
-import { blockHash, decodeBlock, encodeBlock, transactionsRoot } from "./block.js";
+import { blockHash, decodeBlock, encodeBlock, transactionsRoot, type BlockHeader } from "./block.js";
 import type { Transaction } from "../tx/transaction.js";
 import { recoverTransactionSender, validateTransaction, txHash } from "../tx/transaction.js";
 import { Journal, WorldState } from "../state/world.js";
@@ -31,6 +31,14 @@ export interface ImportedReceipt {
   tipNumber: number;
   tipHash: string;
 }
+
+/** Proof-of-work validation function. Production uses verifyHeaderPoW;
+ *  tests may inject a bypass validator that always accepts.
+ */
+export type PowValidator = (
+  header: BlockHeader,
+  proof: { nonce: bigint },
+) => { ok: boolean; hash: string; reason?: string };
 
 interface ChainIndexEntry {
   block: Block;
@@ -68,9 +76,15 @@ export class Blockchain {
   private ledgerFile: string | null = null;
   /** Injected by node wiring so accepted txs are dropped from mempools. */
   mempoolRef: { remove(hash: string): void } | null = null;
+  /** PoW validator: production uses verifyHeaderPoW; tests may inject a bypass. */
+  private readonly powValidator: PowValidator;
 
-  constructor(private readonly config: GenesisConfig) {
+  constructor(
+    private readonly config: GenesisConfig,
+    opts?: { powValidator?: PowValidator },
+  ) {
     this.executor = new TransactionExecutor(config.chainId);
+    this.powValidator = opts?.powValidator ?? verifyHeaderPoW;
     const genesis = buildGenesis(config);
     const hash = blockHash(genesis.block.header);
     this.bestHash = hash;
@@ -151,9 +165,11 @@ export class Blockchain {
    * Validates and imports a block (possibly out of order). Retries pending
    * children afterwards so gap-filling converges.
    *
-   * Production entry point: always verifies the header PoW. Tests that need to
-   * exercise other validation rules without performing real PoW must use
-   * {@link acceptBlockForTesting} instead.
+   * Production entry point: always verifies the header PoW via the injected
+   * powValidator (defaults to verifyHeaderPoW). Tests that need to exercise
+   * other validation rules without performing real PoW construct a Blockchain
+   * with a test-only powValidator bypass injected at construction time;
+   * production node/RPC/mining/P2P code never passes that option.
    */
   acceptBlock(block: Block): ImportedReceipt & { accepted: boolean } {
     const preTip = this.tip.hash;
@@ -177,37 +193,7 @@ export class Blockchain {
     };
   }
 
-  /**
-   * Test-only block acceptance that skips the PoW hash check while still
-   * running every other validation rule (difficulty structure, retarget, gas,
-   * coinbase, transactionsRoot, state execution, stateRoot, supply cap,
-   * duplicate block, timestamps).
-   *
-   * This is intentionally NOT part of the production `acceptBlock` API and must
-   * never be called by node, networking, mining, or any non-test code. Real
-   * PoW validation is covered by test/pow.test.ts and by the production
-   * `acceptBlock` path above.
-   */
-  acceptBlockForTesting(block: Block): ImportedReceipt & { accepted: boolean } {
-    const preTip = this.tip.hash;
-    const first = this.tryImport(block, true);
-    const pendingSnapshot = [...this.pending.values()];
-    this.pending.clear();
-    for (const candidate of pendingSnapshot) {
-      this.tryImport(candidate, false);
-    }
-    const result = this.tip;
-    const acceptedNow = first.accepted === true;
-    return {
-      accepted: acceptedNow,
-      reason: first.reason && !acceptedNow ? first.reason : undefined,
-      reorganized: result.hash !== preTip,
-      tipNumber: result.number,
-      tipHash: result.hash,
-    };
-  }
-
-  private tryImport(block: Block, skipPoW = false): ImportedReceipt {
+  private tryImport(block: Block): ImportedReceipt {
     const reject = (reason: string): ImportedReceipt => ({ ...this.tipInfo(), reorganized: false, reason });
     const parentHash = block.header.parentHash;
     const parent = this.byHash.get(parentHash);
@@ -244,11 +230,7 @@ export class Blockchain {
     ) {
       return reject(`invalid difficulty: ${difficulty}`);
     }
-    // skipPoW is true only from the test-only acceptBlockForTesting path.
-    // Production acceptBlock always calls tryImport(block) with skipPoW = false.
-    const pow: { ok: boolean; hash: string; reason?: string } = skipPoW
-      ? { ok: true, hash: "" }
-      : verifyHeaderPoW(block.header, { nonce: block.header.nonce });
+    const pow = this.powValidator(block.header, { nonce: block.header.nonce });
     if (!pow.ok) return reject(pow.reason ?? "PoW validation failed");
 
     // Difficulty retarget: anchors come from THIS branch (the parent chain the
