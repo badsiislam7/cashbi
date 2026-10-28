@@ -1,45 +1,108 @@
-Continue the existing CashBI project in `/workspaces/codespaces-blank`. Do not recreate the project or change permanent mainnet parameters.
+# CashBI — Audit and Isolate the Test-Only PoW Bypass
 
-## Next milestone: Real two-node integration test
+## Objective
 
-The previous audit reports 48 passing tests. Now verify the actual runtime behavior of two independent CashBI full nodes.
+Audit and repair the PoW validation bypass introduced during the previous test-repair task. Ensure that production block-import and P2P paths can never accidentally bypass proof-of-work validation, while keeping the test suite fast and deterministic.
 
-1. Inspect the existing CLI and determine the exact supported commands for starting nodes, configuring data directories, connecting peers, submitting signed transactions, and mining.
-2. Start two separate node processes with different data directories and identical development genesis configuration.
-3. Confirm that both nodes have the same chain ID and genesis hash.
-4. Connect them using the existing P2P protocol. Record whether the connection and handshake actually succeed.
-5. Submit a correctly signed transaction to node A and verify that node B receives it.
-6. Mine a block with explicit mining consent and verify that both nodes accept the same block and converge on the same best block hash, height, and relevant balances.
-7. Stop and restart node B using its existing data directory. Verify ledger recovery and reconnection.
-8. Test that a node configured with a different genesis or chain ID is rejected.
-9. Capture actual command outputs and exit codes. Do not infer success from unit tests or simulate network results.
-10. Add an automated integration test and document the exact reproducible procedure in `docs/testnet-two-nodes.md`.
+Repository: `/workspaces/codespaces-blank`
 
-If this environment cannot support multiple node processes or P2P connectivity, document the blocker and provide the exact manual steps needed to run the test elsewhere.
+## 1. Inspect Before Editing
 
-Run the existing tests, typecheck, lint, and security checks after any code changes.
+Inspect the current working tree and the exact implementations of:
 
-Preserve existing files and Git history. Do not push, deploy, publish, or claim production readiness. Keep all project work inside `/workspaces/codespaces-blank`.
+- `src/chain/blockchain.ts`
+- `src/consensus/pow.ts`
+- `src/mining/miner.ts`
+- `src/net/server.ts`
+- `test/pow.test.ts`
+- `test/chain.test.ts`
+- `test/node.test.ts`
+- `test/integration-two-nodes.test.ts`
 
-At the end, report whether the two-node runtime test genuinely passed, with evidence for each step and a list of any remaining blockers.
+Search for every occurrence of `skipPoWValidation`, `acceptBlock`, `tryImport`, and every P2P block-reception handler.
 
-In `/workspaces/codespaces-blank`, report the actual outcome of the latest requested two-node runtime integration test.
+Preserve all existing user changes. Do not reset, clean, stash, revert, or overwrite unrelated modifications.
 
-Do not implement new features or modify files yet.
+## 2. Remove the Production Bypass
 
-Answer each question with evidence from actual command execution:
+Remove `skipPoWValidation` from the public production `acceptBlock()` API and from any production import API that can bypass PoW.
 
-1. Did you launch two independent CashBI node processes, or did you only run an automated test using two node objects in one process?
-2. What exact commands were used to start each node?
-3. What separate data directories and ports did the nodes use?
-4. Did the nodes establish an actual TCP P2P connection and complete the handshake?
-5. Was a signed transaction submitted to node A and observed in node B's mempool?
-6. Was a block mined and independently accepted by both nodes? Provide the resulting block hash and height from each node.
-7. Was node B stopped and restarted using the same data directory? Did it recover the same chain tip and reconnect?
-8. Was a mismatched genesis or chain ID actually tested and rejected?
-9. Provide the exact terminal outputs, exit codes, and relevant test names for each completed step.
-10. If any step was not performed, explicitly mark it NOT TESTED. Do not infer runtime success from unit tests, and do not fabricate command output.
+Production block imports must always verify the header PoW. This requirement applies to every ordinary block-import path, including externally received P2P blocks.
 
-Finally, state whether `docs/testnet-two-nodes.md` exists and whether its procedure has been executed end to end.
+If tests need to bypass PoW for testing other validation rules, isolate that capability in a clearly test-only fixture or helper that production node and networking code cannot accidentally invoke.
 
-Do not push, deploy, or change consensus parameters. Preserve the existing project and Git history.
+Do not merely rename the bypass flag or leave an equivalent public production bypass.
+
+If the project architecture cannot safely isolate this test-only behavior without a larger redesign, stop and report the blocker rather than weakening production validation.
+
+## 3. Add Deterministic PoW Acceptance and Rejection Tests
+
+Add or retain tests that demonstrate all of the following:
+
+- A known, independently verified valid PoW header is accepted by the normal production validation path.
+- An invalid nonce/header is rejected by the normal production block-import path.
+- P2P-received blocks cannot bypass PoW validation.
+- Existing difficulty, target-boundary, target-exceeded, and invalid-difficulty tests remain intact.
+
+Use a precomputed valid PoW test vector with its exact header fields, nonce, digest, target, and expected result documented. Verify the vector using the actual consensus implementation and, where practical, an independent calculation or verification script.
+
+Do not run billions of hashes in unit tests. Do not claim that nonce `0` is valid without verifying the complete header against the actual target.
+
+## 4. Repair Integration-Test Coverage
+
+The current integration test verifies startup, handshake, transaction submission, restart recovery, reconnection, and mismatched-genesis rejection. It does not currently prove actual block propagation.
+
+Update the tests so their claims match what they exercise.
+
+Where feasible, test actual block propagation between two nodes using a deterministic valid PoW fixture or a test network configuration that does not alter production consensus parameters.
+
+Any test-only fixture or network configuration must be isolated from production defaults and must not silently introduce a consensus bypass.
+
+Verify that the receiving node validates the block through its normal production P2P import path.
+
+If genuine propagation cannot be tested safely within this task, clearly document the gap and do not claim propagation coverage.
+
+## 5. Preserve Consensus Decisions
+
+Do not change:
+
+- `POW_LIMIT` or its compact representation.
+- The PoW hash construction or byte order.
+- Difficulty calculation or retarget rules.
+- Chain ID `901291`.
+- Maximum supply of `16,000,000 BIC`.
+- Block reward or halving policy.
+- Genesis fields, nonce, or hash.
+- `DEV_PARAM_VERSION`.
+- Handshake compatibility rules.
+
+Do not mine Genesis, update Genesis hashes, activate new consensus parameters, or undertake unrelated consensus redesign.
+
+Do not introduce a production fast-PoW mode or weaken validation to make tests pass.
+
+## 6. Verify
+
+Run and report the actual results of:
+
+1. Focused PoW tests.
+2. Chain tests.
+3. Node and two-node integration tests.
+4. Full `npm test`.
+5. `npx tsc --noEmit`.
+6. `npm run lint`.
+7. `npm run security:check`.
+
+Inspect the final diff and search again for all PoW bypasses. Confirm that no production API or network path can disable PoW validation.
+
+Report separately:
+- Tests that genuinely exercise production PoW validation.
+- Tests that use isolated test fixtures.
+- Whether actual P2P block propagation was tested.
+- Any remaining limitations.
+- All modified and untracked files.
+
+Do not commit, push, deploy, or perform destructive Git operations. Preserve the current working tree and all pre-existing changes.
+
+Stop after this audit and repair task.
+
+Once finished, create a new .md file containing a comprehensive, detailed report of everything that has been accomplished.

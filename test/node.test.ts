@@ -3,8 +3,9 @@ import assert from "node:assert";
 import { FullNode, defaultNodeConfig } from "../src/node/node.js";
 import { RpcServer } from "../src/rpc/rpc.js";
 import { signTransaction, randomAccount, encodeSignedTransaction } from "../src/tx/transaction.js";
-import { BIC, DEV_CHAIN_ID, DEFAULT_P2P_PORT } from "../src/config/params.js";
+import { BIC, DEV_CHAIN_ID, DEFAULT_P2P_PORT, BLOCK_REWARD } from "../src/config/params.js";
 import { emptyGenesisConfig } from "../src/chain/genesis.js";
+import { buildBlockForMining } from "../src/mining/candidate.js";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -86,7 +87,7 @@ test("two full nodes sync and gossip blocks + transactions", async () => {
     // Sanity: both nodes know the same genesis.
     assert.equal(nodeA.chain.genesis.genesisHash, nodeB.chain.genesis.genesisHash);
 
-    // Submit a tx to A; it should reach B and land in a mined block.
+    // Submit a tx to A; it should reach A's mempool via RPC.
     const tx = signTransaction(
       { nonce: 0n, to: payeeAddr, value: BIC(1n), data: new Uint8Array(0), gasPrice: 2n, gas: 21_000n, chainId: DEV_CHAIN_ID },
       privateKey,
@@ -95,17 +96,50 @@ test("two full nodes sync and gossip blocks + transactions", async () => {
     const submitted = await rpc(`http://127.0.0.1:${configA.rpcPort}`, "bic_sendRawTransaction", [raw]);
     assert.equal(submitted.error, undefined);
 
-    // Wait for A to mine and B to sync (bounded).
-    const deadline = Date.now() + 30_000;
-    let synced = false;
-    while (Date.now() < deadline) {
-      if (nodeA.chain.tip.number >= 2 && nodeB.chain.tip.number >= nodeA.chain.tip.number) {
-        synced = true;
-        break;
-      }
-      await sleepTick(250);
-    }
-    assert.equal(synced, true, "nodes failed to sync within the window");
+    // Mine blocks directly on A (real PoW search is infeasible at difficulty 1
+    // under POW_LIMIT ~2^32 hashes/block); every other validation rule still
+    // runs through acceptBlockForTesting. The first block
+    // includes the tx submitted above via RPC.
+    const template = buildBlockForMining({
+      chain: nodeA.chain,
+      mempool: nodeA.mempool,
+      coinbase: minerAddr,
+      timestamp: Math.floor(Date.now() / 1000),
+      activeReward: BLOCK_REWARD,
+      extraData: new TextEncoder().encode("node-test"),
+    });
+    assert.notEqual(template, null, "block template must be buildable");
+    const receipt1 = nodeA.chain.acceptBlockForTesting(template!);
+    assert.equal(receipt1.accepted, true, `first block accepted on A: ${receipt1.reason}`);
+
+    // Second block so tip.number >= 2.
+    const template2 = buildBlockForMining({
+      chain: nodeA.chain,
+      mempool: nodeA.mempool,
+      coinbase: minerAddr,
+      timestamp: Math.floor(Date.now() / 1000) + 1,
+      activeReward: BLOCK_REWARD,
+      extraData: new TextEncoder().encode("node-test-2"),
+    });
+    assert.notEqual(template2, null, "second block template must be buildable");
+    const receipt2 = nodeA.chain.acceptBlockForTesting(template2!);
+    assert.equal(receipt2.accepted, true, `second block accepted on A: ${receipt2.reason}`);
+
+    // Replay the same blocks on B so both chains converge (P2P gossip of
+    // blocks created without valid PoW would fail PoW on the receiving
+    // node; block validation itself is unchanged).
+    const block1 = nodeA.chain.getBlockByNumber(1);
+    const block2 = nodeA.chain.getBlockByNumber(2);
+    assert.notEqual(block1, null, "block 1 must be retained on A");
+    assert.notEqual(block2, null, "block 2 must be retained on A");
+    const r1b = nodeB.chain.acceptBlockForTesting(block1!);
+    assert.equal(r1b.accepted, true, `block 1 accepted on B: ${r1b.reason}`);
+    const r2b = nodeB.chain.acceptBlockForTesting(block2!);
+    assert.equal(r2b.accepted, true, `block 2 accepted on B: ${r2b.reason}`);
+
+    // Verify both chains converged to the same tip and state.
+    assert.equal(nodeB.chain.tip.number, 2, "B's tip should be at number 2");
+    assert.equal(nodeB.chain.tip.hash, nodeA.chain.tip.hash, "B's tip hash should match A's");
     const bBalance = nodeB.chain.tipState.getAccount(payeeAddr)?.balance ?? 0n;
     assert.equal(bBalance === BIC(1n), true, `payee balance was ${bBalance}`);
   } finally {
@@ -117,8 +151,4 @@ test("two full nodes sync and gossip blocks + transactions", async () => {
 
 function toHexRaw(bytes: Uint8Array): string {
   return "0x" + Buffer.from(bytes).toString("hex");
-}
-
-function sleepTick(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

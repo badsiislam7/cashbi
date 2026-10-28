@@ -27,7 +27,7 @@ export interface P2PServerConfig {
 }
 
 export type PeerMessage =
-  | { type: "HELLO"; protocol: string; networkVersion: number; chainId: number; genesisHash: string; bestNumber: number; bestHash: string }
+  | { type: "HELLO"; protocol: string; networkVersion: number; paramVersion: string; chainId: number; genesisHash: string; bestNumber: number; bestHash: string }
   | { type: "GET_BLOCKS"; startNumber: number; maxCount: number }
   | { type: "BLOCKS"; blocks: string[]; tipNumber: number; tipHash: string }
   | { type: "NEW_BLOCK"; block: string }
@@ -197,6 +197,18 @@ export class P2PServer extends EventEmitter {
           this.dropPeer(id); // incompatible chain — do not talk further
           return;
         }
+        // Consensus-parameter compatibility: a peer MUST announce a
+        // paramVersion that exactly matches the local version. A peer that
+        // omits the field, sends a non-string value, or sends a different
+        // string is dropped — nodes with incompatible consensus rules must
+        // never share a chain. The genesis hash alone does not change when
+        // consensus parameters change (they are not encoded in the genesis
+        // header), so version enforcement is the only wire-level protection
+        // against silent rule mixing.
+        if (typeof message.paramVersion !== "string" || message.paramVersion !== this.config.paramVersion) {
+          this.dropPeer(id); // incompatible or missing consensus parameters — refuse to sync
+          return;
+        }
         peer.bestNumber = message.bestNumber;
         peer.bestHash = message.bestHash;
         this.emit("bestNumber", peer, message.bestNumber, message.bestHash);
@@ -246,6 +258,7 @@ export class P2PServer extends EventEmitter {
       type: "HELLO",
       protocol: P2P_PROTOCOL,
       networkVersion: this.config.networkVersion,
+      paramVersion: this.config.paramVersion,
       chainId: this.config.chainId,
       genesisHash: this.config.genesisHash,
       bestNumber,

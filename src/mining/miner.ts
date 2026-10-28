@@ -13,7 +13,7 @@ import type { Block, BlockHeader } from "../chain/block.js";
 import type { Blockchain } from "../chain/blockchain.js";
 import type { Mempool } from "../tx/mempool.js";
 import { buildBlockForMining } from "./candidate.js";
-import { delayMs, sleep } from "../util/async.js";
+import { sleep } from "../util/async.js";
 import { utf8ToBytes } from "../util/bytes.js";
 import { isMiningCandidate } from "../consensus/pow.js";
 import { BLOCK_REWARD } from "../config/params.js";
@@ -116,7 +116,7 @@ export class Miner {
         await sleep(250);
         continue;
       }
-      const mined = this.searchNonce(candidate);
+      const mined = await this.searchNonce(candidate);
       if (mined && !this.stopRequested) {
         this.rounds += 1;
         this.options.onMinedBlock?.(mined);
@@ -131,7 +131,7 @@ export class Miner {
     }
   }
 
-  private searchNonce(candidate: Block): Block | null {
+  private async searchNonce(candidate: Block): Promise<Block | null> {
     const header = candidate.header;
     const budget = this.options.hashRatePerSecond;
     const batch = budget > 0 ? Math.max(1, Math.min(64, Math.floor(budget / 32))) : 64;
@@ -144,14 +144,18 @@ export class Miner {
         }
       }
       this.hashesTried += batch;
-      if (budget > 0) delayMs(1000 / budget);
-      else if (batch % 8 === 0) await0();
+      if (budget > 0) {
+        // Yield cooperatively between batches so RPC, networking, timers and
+        // shutdown stay responsive. sleep() hands control back to the event
+        // loop instead of blocking it synchronously (delayMs used
+        // Atomics.wait, which froze the whole thread).
+        await sleep(1000 / budget);
+      } else {
+        // Unlimited budget: still yield once per batch to avoid starving the
+        // event loop when no valid nonce is found quickly.
+        await sleep(1);
+      }
     }
     return null;
   }
-}
-
-function await0(): void {
-  // Small parking helper so busy loops do not starve libuv timers.
-  delayMs(1);
 }

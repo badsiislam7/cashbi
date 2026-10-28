@@ -1,52 +1,76 @@
 /**
  * Proof-of-Work consensus for CashBI.
  *
- * Algorithm: keccak256(keccak256(rlp(headerWithoutNonce)) || 8-byte BE nonce)
+ * Algorithm: SHA-256 double digest over a keccak256-prehashed header view.
+ *   powHash = SHA-256(SHA-256(keccak256(rlp(headerWithoutNonce)) || 8-byte BE nonce))
  * must be numerically below the target derived from difficulty:
- *   target = MAX_UINT256 / difficulty
+ *   target = POW_LIMIT / difficulty
+ *
+ * Difficulty→target mapping (defined here, implemented identically for
+ * miners and validators via difficultyToTarget/meetsTarget — no Bitcoin
+ * compact-bits transplant): the digest is interpreted as a big-endian
+ * unsigned integer (most significant byte first) and compared with `<=`
+ * against target. Difficulty 1.0 (the initial/genesis difficulty) maps to
+ * target = POW_LIMIT, the Bitcoin mainnet difficulty-1 limit (compact target
+ * 0x1d00ffff), so difficulty 1 requires real proof of work rather than
+ * accepting every digest. Higher difficulty linearly halves the accepted
+ * interval of digests.
+ * Keccak-256 remains the state/EVM hash and is used to prehash the header
+ * view before the SHA-256 double-digest PoW operation.
  *
  * The ceiling keeps CPU mining viable on devnets; production parameters are
  * an open decision recorded in UNRESOLVED_DECISIONS.md.
  */
 
 /**
- * Bounded median-anchored difficulty adjustment (dev defaults; decisions
- * D-5/D-8 open). Retargets happen only at heights h with
- * h % DIFFICULTY_RETARGET_INTERVAL === 0, using two inclusive 10-timestamp
- * samples taken from the branch being evaluated:
+ * Bounded median-anchored difficulty adjustment (task-approved targets;
+ * decisions D-5/D-8 still track exact production values). Retargets happen
+ * only at heights h with h % DIFFICULTY_RETARGET_INTERVAL === 0, using two
+ * inclusive 10-timestamp samples taken from the branch being evaluated,
+ * spaced exactly one retarget interval apart:
  *
- *   old sample: heights [h - 69, h - 60]  (10 timestamps)
- *   new sample: heights [h - 9, h]        (10 timestamps; includes h itself)
+ *   old sample: heights [h - INTERVAL - 9, h - INTERVAL]  (10 timestamps)
+ *   new sample: heights [h - 9, h]                        (10 timestamps; h included)
  *
  * The lower median is the fifth-smallest timestamp (sorted index 4); the two
  * medians sit exactly DIFFICULTY_RETARGET_INTERVAL heights apart, so the
- * expected elapsed is TARGET_BLOCK_TIME_SECONDS * DIFFICULTY_RETARGET_INTERVAL.
+ * expected elapsed is TARGET_BLOCK_TIME_SECONDS * DIFFICULTY_RETARGET_INTERVAL
+ * (= 1536 × 600 = 921,600 s with the approved targets). The new difficulty
+ * takes effect at the retargeting block h itself (height h validates against
+ * it; the next interval until h + 1536).
  *
  *   elapsed = lowerMedian(new) - lowerMedian(old)          // >= 0 by stamp rules
- *   e'      = clamp(elapsed, 15, 240)                      // [expected/4, 4*expected]
+ *   e'      = clamp(elapsed, expected/4, 4*expected)       // per-retarget bounds
  *   next    = clamp((parentDifficulty * expected) / e', MIN_DIFFICULTY, MAX_DIFFICULTY)
  *
- * All difficulty arithmetic is exact integer math (BigInt floor division);
- * no floating point or rounding enters the consensus formula. The height
- * offsets below assume DIFFICULTY_RETARGET_INTERVAL = 60 (approved Phase 1
- * parameter); changing the interval is an open decision (D-5) and requires
- * redesigning the sample offsets, not just the constant.
+ * With this division, e' = expected/4 raises difficulty by EXACTLY 4x and
+ * e' = 4*expected lowers it to EXACTLY one quarter — the approved per-retarget
+ * adjustment bounds. All difficulty arithmetic is exact integer math (BigInt
+ * floor division); no floating point or rounding enters consensus, so every
+ * node obtains the same result from the same inputs. Side branches sample
+ * their OWN branch timestamps; missing anchor history is a hard, deterministic
+ * error (see nextDifficulty's callback contract). Equal timestamps across a
+ * whole window yield the lower bound (difficulty rises to the 4x cap).
+ * Integer overflow cannot occur: difficulty ≤ 2^32-1 and timestamps are
+ * Unix seconds (double precision < 2^53 seconds), so products live in BigInt.
  *
- * First-retarget bootstrap (approved design): the old sample at h = 60 refers
- * to heights -9..-1 which do not exist. Those are DETERMINISTIC VIRTUAL
- * ANCHORS defined solely from the genesis header timestamp:
- * VTS(x) = genesis.header.timestamp + x (see virtualAnchorTimestamp). They are
- * never treated as blocks and play no role in block validity, state
- * execution, block lookup, or fork choice — only in this timestamp
- * difference. A steady 1 s/block chain yields elapsed exactly 60 at h = 60.
+ * First-retarget bootstrap: at h = 1536 the old sample refers to heights
+ * -9..-1536 which do not exist. Those are NON-EXISTENT VIRTUAL ANCHORS defined
+ * solely from the genesis header timestamp:
+ *   VTS(x) = genesis.header.timestamp + x * TARGET_BLOCK_TIME_SECONDS
+ * (see virtualAnchorTimestamp). They are never treated as blocks and play no
+ * role in block validity, state execution, block lookup, or fork choice — only
+ * in this timestamp difference. A steady chain (one stamp per target interval)
+ * measures elapsed exactly 921,600 at h = 1536 and keeps its difficulty.
  */
 import {
   DIFFICULTY_RETARGET_INTERVAL,
   MAX_DIFFICULTY,
   MIN_DIFFICULTY,
+  POW_LIMIT,
   TARGET_BLOCK_TIME_SECONDS,
 } from "../config/params.js";
-import { keccak256 } from "../crypto/hash.js";
+import { sha256 } from "../crypto/hash.js";
 import { bigToHexBE, bytesEq, concatBytes, hexBEToBig, padLeft } from "../util/bytes.js";
 import type { BlockHeader } from "../chain/block.js";
 import { hashHeaderWithoutNonce } from "../chain/block.js";
@@ -59,15 +83,15 @@ export type PowResult = { ok: true; hash: string } | { ok: false; hash: string; 
 
 export function difficultyToTarget(difficulty: bigint): bigint {
   if (difficulty < 1n) throw new Error("difficulty must be >= 1");
-  const one = 1n << 256n;
-  return one / difficulty;
+  return POW_LIMIT / difficulty;
 }
 
-/** Hash of the header with the nonce bytes appended (the "mining hash"). */
+/** Double-SHA-256 of the header-with-nonce bytes (the "mining hash"). */
 export function powHash(header: BlockHeader, nonce: bigint): Uint8Array {
   const inner = hashHeaderWithoutNonce(header);
   const nonceBytes = bigToHexBE(nonce & 0xffffffffffffffffn, 8); // 8-byte BE
-  return keccak256(concatBytes(inner, nonceBytes));
+  const innerHash = sha256(concatBytes(inner, nonceBytes));
+  return sha256(innerHash);
 }
 
 export function meetsTarget(powDigest: Uint8Array, difficulty: bigint): boolean {
@@ -82,25 +106,31 @@ export function verifyHeaderPoW(header: BlockHeader, proof: PowProof): PowResult
   return { ok: true, hash: "" };
 }
 
-/** Heights relative to a retarget height h occupied by the anchor samples. */
-const OLD_SAMPLE_FIRST_OFFSET = -69; // h - 69 (oldest)
-const OLD_SAMPLE_LAST_OFFSET = -60; // h - 60 (newest of the old sample)
+/** Heights relative to a retarget height h occupied by the anchor samples.
+ *  Sample width is fixed (10 lower-median timestamps); the old sample is
+ *  shifted back by exactly DIFFICULTY_RETARGET_INTERVAL from the new one. */
 const NEW_SAMPLE_FIRST_OFFSET = -9; // h - 9
 const NEW_SAMPLE_LAST_OFFSET = 0; // h (the retarget block itself)
 const SAMPLE_SIZE = 10; // both are 10-timestamp samples (inclusive endpoints)
 
-const EXPECTED_ELAPSED = DIFFICULTY_RETARGET_INTERVAL * TARGET_BLOCK_TIME_SECONDS; // 60 with dev defaults
-const ELAPSED_CLAMP_LOW = 15; // floor(EXPECTED_ELAPSED / 4) = expected/4 lower bound
-const ELAPSED_CLAMP_HIGH = 240; // 4 * EXPECTED_ELAPSED = expected*4 upper bound
+const EXPECTED_ELAPSED = DIFFICULTY_RETARGET_INTERVAL * TARGET_BLOCK_TIME_SECONDS; // 1536 × 600 = 921,600 s
+const ELAPSED_CLAMP_LOW = EXPECTED_ELAPSED / 4; // 230,400 → rises difficulty by EXACTLY 4x
+const ELAPSED_CLAMP_HIGH = EXPECTED_ELAPSED * 4; // 3,686,400 → falls to EXACTLY one quarter
+
+/** Oldest anchor height touched by a retarget at h: h - (INTERVAL + 9).
+ *  Shared with the branch-walk implementations so template building and
+ *  validation can never disagree about anchor depth. */
+export const RETARGET_OLDEST_ANCHOR_OFFSET = DIFFICULTY_RETARGET_INTERVAL + (-NEW_SAMPLE_FIRST_OFFSET);
 
 /**
  * Deterministic virtual-anchor timestamp for the first retarget (heights < 0),
- * derived solely from the genesis header timestamp. Not a real block; used
- * only inside retarget anchor samples. Undefined behavior for h >= 0 — callers
- * must use real branch data there.
+ * derived solely from the genesis header timestamp: one synthetic TARGET
+ * interval per height so that a steady honest chain measures the expected
+ * elapsed. Not a real block; used only inside retarget anchor samples.
+ * Undefined behavior for h >= 0 — callers must use real branch data there.
  */
 export function virtualAnchorTimestamp(height: number, genesisTimestamp: number): number {
-  return genesisTimestamp + height;
+  return genesisTimestamp + height * TARGET_BLOCK_TIME_SECONDS;
 }
 
 /** Lower median of a retarget sample: fifth-smallest of 10 (sorted index 4). */
@@ -140,7 +170,7 @@ export function nextDifficulty(
   if (retargetHeight % DIFFICULTY_RETARGET_INTERVAL !== 0) return parentDifficulty;
   const h = retargetHeight;
   const oldSample: number[] = [];
-  for (let height = h + OLD_SAMPLE_FIRST_OFFSET; height <= h + OLD_SAMPLE_LAST_OFFSET; height++) {
+  for (let height = h - RETARGET_OLDEST_ANCHOR_OFFSET; height <= h - DIFFICULTY_RETARGET_INTERVAL; height++) {
     oldSample.push(timestampAt(height));
   }
   const newSample: number[] = [];

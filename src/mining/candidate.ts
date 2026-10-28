@@ -12,12 +12,13 @@
  *   buildBlockOn(...)        — mine on an arbitrary parent (fork mining).
  */
 import type { Block, BlockHeader } from "../chain/block.js";
-import { transactionsRoot } from "../chain/block.js";
+import { transactionsRoot, blockHash } from "../chain/block.js";
 import type { Blockchain } from "../chain/blockchain.js";
 import type { Mempool } from "../tx/mempool.js";
 import { Journal } from "../state/world.js";
 import { sortTransactions, txHash as txHashOf, recoverTransactionSender, type Transaction } from "../tx/transaction.js";
-import { nextDifficulty } from "../consensus/pow.js";
+import { nextDifficulty, RETARGET_OLDEST_ANCHOR_OFFSET, virtualAnchorTimestamp } from "../consensus/pow.js";
+import { cappedReward } from "../consensus/issuance.js";
 import { DIFFICULTY_RETARGET_INTERVAL, MAX_BLOCK_GAS, MAX_TIMESTAMP_STEP_SECONDS } from "../config/params.js";
 import { TransactionExecutor } from "../tx/execute.js";
 import type { WorldState as RealWorldState } from "../state/world.js";
@@ -66,9 +67,10 @@ export function buildBlockOn(
   // it into the consensus range [parentTs, parentTs + MAX_TIMESTAMP_STEP_SECONDS]:
   //  - normally the suggestion already satisfies the range (wall clock has
   //    passed the parent's stamp), so behavior is unchanged;
-  //  - when chain lags wall clock by >30 s (e.g. an old dev genesis
-  //    timestamp), every candidate deterministically advances chain time by
-  //    the maximum +30 s step (equal stamps keep the slow case working too).
+  //  - when chain lags wall clock by more than one target interval (e.g. an
+  //    old dev genesis timestamp), every candidate deterministically advances
+  //    chain time by the maximum step (equal stamps keep the slow case
+  //    working too). MAX_TIMESTAMP_STEP_SECONDS = one target interval.
   const timestamp = Math.min(Math.max(input.timestamp, parentTs), parentTs + MAX_TIMESTAMP_STEP_SECONDS);
 
   let difficulty: bigint;
@@ -117,11 +119,15 @@ export function buildBlockOn(
     }
   }
 
-  // Coinbase block reward (same dev issuance semantics as validation).
-  if (input.activeReward > 0n) {
+  // Coinbase block reward — SAME capped-issuance semantics as validation
+  // (src/chain/blockchain.ts): clamp the subsidy to the remaining mintable
+  // supply so templates and validators agree on the post state at the cap
+  // boundary and in the zero-reward tail.
+  const reward = cappedReward(input.activeReward, state.totalSupply());
+  if (reward > 0n) {
     const journal = new Journal(state);
     const coinbase = journal.ensureAccount(input.coinbase);
-    coinbase.balance += input.activeReward;
+    coinbase.balance += reward;
     journal.applyTo(state);
   }
 
@@ -162,19 +168,29 @@ function branchTimestampLookup(
     };
   }
   const genesisTimestamp = chain.genesis.genesisTimestamp;
+
   const branchTs = new Map<number, number>();
   let cursor: Block | null = parentBlock;
-  while (cursor && cursor.header.number >= retargetHeight - 69) {
+  while (cursor && cursor.header.number >= retargetHeight - RETARGET_OLDEST_ANCHOR_OFFSET) {
     branchTs.set(cursor.header.number, cursor.header.timestamp);
     if (cursor.header.number === 0) break;
     cursor = chain.getBlock(cursor.header.parentHash)?.block ?? null;
   }
   return (height: number): number => {
-    if (height < 0) return genesisTimestamp + height;
+    if (height < 0) return virtualAnchorTimestamp(height, genesisTimestamp);
     if (height === retargetHeight) return candidateTimestamp;
     const ts = branchTs.get(height);
-    if (ts === undefined) throw new Error(`no block on this branch at anchor height ${height}`);
-    return ts;
+    if (ts !== undefined) return ts;
+    // Fork-retention pruning may have removed canonical ancestors needed by
+    // the anchor walk. Fall back to the chain's best-chain timestamp ledger
+    // ONLY for templates mined on the canonical best tip (buildBlockForMining
+    // passes it as parentBlock); fork templates fail deterministically
+    // instead of silently reading another branch's timestamps.
+    if (blockHash(parentBlock.header) === chain.tip.hash) {
+      const ledgerTs = chain.getBestChainTimestampAt(height);
+      if (ledgerTs !== undefined) return ledgerTs;
+    }
+    throw new Error(`no block on this branch at anchor height ${height}`);
   };
 }
 

@@ -3,8 +3,7 @@ import assert from "node:assert";
 import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isMiningCandidate } from "../src/consensus/pow.js";
-import { BIC, DEV_CHAIN_ID, BLOCK_REWARD, MAX_FUTURE_TIMESTAMP_SECONDS, MAX_TOTAL_SUPPLY, MIN_DIFFICULTY } from "../src/config/params.js";
+import { BIC, DEV_CHAIN_ID, BLOCK_REWARD, MAX_FUTURE_TIMESTAMP_SECONDS, MAX_TOTAL_SUPPLY } from "../src/config/params.js";
 import { Blockchain } from "../src/chain/blockchain.js";
 import { buildBlockForMining, buildBlockOn } from "../src/mining/candidate.js";
 import { emptyGenesisConfig } from "../src/chain/genesis.js";
@@ -31,7 +30,7 @@ function fundedChain(genesisTs = Math.floor(1_700_000_000)): ChainSet {
   return { chain, mempool, user, miner };
 }
 
-/** Mines one block (nonce search) and submits it to the chain. */
+/** Mines one block and submits it to the chain (test-only: skips PoW search). */
 function mineAndSubmit(
   chain: Blockchain,
   mempool: Mempool,
@@ -48,11 +47,11 @@ function mineAndSubmit(
     extraData: new TextEncoder().encode(extra),
   });
   if (!template) return { accepted: false, reason: "no template" };
-  const receipt = chain.acceptBlock(findNonce(template));
+  const receipt = acceptTestBlock(chain, findNonce(template));
   return { accepted: receipt.accepted, reason: receipt.reason };
 }
 
-/** Mines on an explicit parent hash (real fork mining via the queue). */
+/** Mines on an explicit parent hash (test-only: skips PoW search). */
 function mineOnParent(
   chain: Blockchain,
   mempool: Mempool,
@@ -80,7 +79,7 @@ function mineOnParent(
   );
   if (!template) return { accepted: false, reason: "no fork template" };
   const mined = findNonce(template);
-  const receipt = chain.acceptBlock(mined);
+  const receipt = acceptTestBlock(chain, mined);
   return {
     accepted: receipt.accepted,
     reason: receipt.reason,
@@ -88,15 +87,25 @@ function mineOnParent(
   };
 }
 
+/** Test-only block acceptance: skips the PoW hash check (~2^32 expected
+ *  hashes per block at difficulty 1 under POW_LIMIT) while still running
+ *  every other validation rule (difficulty structure, retarget, gas,
+ *  coinbase, transactionsRoot, state execution, stateRoot, supply cap).
+ *  Real PoW validation is covered by test/pow.test.ts. */
+function acceptTestBlock(
+  chain: Blockchain,
+  block: NonNullable<ReturnType<typeof buildBlockForMining>>,
+) {
+  return chain.acceptBlockForTesting(block);
+}
+
+/** Test-only nonce helper: returns the block template with nonce set to 0n
+ *  without searching. A real nonce search is infeasible at difficulty 1
+ *  under POW_LIMIT (~2^32 expected hashes); chain tests rely on
+ *  acceptTestBlock's acceptBlockForTesting instead. */
 function findNonce(template: NonNullable<ReturnType<typeof buildBlockForMining>>): NonNullable<ReturnType<typeof buildBlockForMining>> {
-  const header = { ...template.header };
-  for (let nonce = 0n; nonce < 100_000n; nonce++) {
-    header.nonce = nonce;
-    if (isMiningCandidate(header, nonce)) {
-      return { header, transactions: template.transactions };
-    }
-  }
-  throw new Error("no PoW nonce found (difficulty sanity)");
+  const header = { ...template.header, nonce: 0n };
+  return { header, transactions: template.transactions };
 }
 
 test("chain: accepts a validated mined block; coinbase reward + supply conservation", () => {
@@ -113,7 +122,7 @@ test("chain: rejects orphan blocks; equal timestamp is now valid (non-decreasing
   const tip = chain.tip;
   // Orphan block (unknown parent)
   const orphan = { ...tip.block, header: { ...tip.block.header, parentHash: "0x" + "10".repeat(32) } };
-  assert.equal(chain.acceptBlock(orphan).accepted, false);
+  assert.equal(acceptTestBlock(chain,orphan).accepted, false);
   // Equal timestamp (stale under the OLD strict-increase rule) now builds a
   // valid candidate and is accepted: Phase 1 permits equal stamps.
   const template = buildBlockForMining({
@@ -125,7 +134,7 @@ test("chain: rejects orphan blocks; equal timestamp is now valid (non-decreasing
     extraData: new TextEncoder().encode("equal-stamp"),
   });
   assert.notEqual(template, null, "equal-stamp candidate must be buildable under the non-decreasing rule");
-  const receipt = chain.acceptBlock(findNonce(template!));
+  const receipt = acceptTestBlock(chain,findNonce(template!));
   assert.equal(receipt.accepted, true, receipt.reason);
   assert.equal(chain.tip.number, 1);
   assert.equal(chain.tip.block.header.timestamp, tip.block.header.timestamp, "block timestamp equals its parent's");
@@ -142,16 +151,9 @@ test("chain: txRoot mismatch rejects block with unclean header", () => {
     extraData: new TextEncoder().encode("tamper"),
   })!;
   const header = { ...template.header, transactionsRoot: "0x" + "12".repeat(32) };
-  for (let nonce = 0n; nonce < 100_000n; nonce++) {
-    header.nonce = nonce;
-    if (isMiningCandidate(header, nonce)) {
-      const receipt = chain.acceptBlock({ header, transactions: template.transactions });
-      assert.equal(receipt.accepted, false);
-      assert.match(receipt.reason ?? "", /transactionsRoot/);
-      return;
-    }
-  }
-  assert.fail("expected a nonce for difficulty 1");
+  const receipt = acceptTestBlock(chain, { header, transactions: template.transactions });
+  assert.equal(receipt.accepted, false);
+  assert.match(receipt.reason ?? "", /transactionsRoot/);
 });
 
 test("chain: fork & reorg — deeper fork replaces the tip", () => {
@@ -280,7 +282,7 @@ test("chain: acceptBlock rejects block with invalid tx without crashing", () => 
   const mined = findNonce(block);
   let threw = false;
   try {
-    const receipt = chain.acceptBlock(mined);
+    const receipt = acceptTestBlock(chain,mined);
     assert.equal(receipt.accepted, false, "block with invalid tx should be rejected");
   } catch {
     threw = true;
@@ -288,18 +290,12 @@ test("chain: acceptBlock rejects block with invalid tx without crashing", () => 
   assert.equal(threw, false, "acceptBlock must not throw on invalid tx in block");
 });
 
-test("chain: block reward does not push total supply over MAX_TOTAL_SUPPLY", () => {
+test("chain: block reward clamp — exact remainder at the 16,000,000 BIC cap, then a zero-reward tail", () => {
   const { mempool, miner } = fundedChain();
   const MAX = MAX_TOTAL_SUPPLY;
-  // Set the chain's total supply right at the cap by directly manipulating
-  // the genesis state through a block that pushes supply to MAX.
-  // Simpler: verify that acceptBlock rejects when supply would exceed cap.
-  // We construct a state at the cap and mine on it.
-
-  // Create a chain where supply is at MAX by mining blocks with reward until
-  // we're close, then verify the next block is rejected.
-  // Since BLOCK_REWARD = 2 BIC and MAX = 100M BIC, we can't mine that many.
-  // Instead, directly test: allocate nearly all supply to a single account.
+  // Create a chain whose supply is within one subsidy of the cap by putting
+  // cap − BLOCK_REWARD in the genesis allocation (inventory manipulation of
+  // devnet balances only — bounds the test length).
   const bigGenesis = emptyGenesisConfig(Math.floor(1_700_000_000));
   bigGenesis.allocations = [{ address: miner.address, balance: MAX - BLOCK_REWARD }];
   const bigChain = new Blockchain(bigGenesis);
@@ -314,11 +310,12 @@ test("chain: block reward does not push total supply over MAX_TOTAL_SUPPLY", () 
     extraData: new TextEncoder().encode("supply-cap"),
   })!;
   const mined = findNonce(template);
-  const receipt = bigChain.acceptBlock(mined);
+  const receipt = acceptTestBlock(bigChain,mined);
   assert.equal(receipt.accepted, true, "block at exactly cap should be accepted");
-  assert.equal(bigChain.tipState.totalSupply(), MAX);
+  assert.equal(bigChain.tipState.totalSupply(), MAX, "the final block mints the exact remainder — cap never crossed");
 
-  // Now try another block — reward would push over cap.
+  // Past the cap the subsidy is zero (zero-reward tail): the block is still
+  // valid (empty coinbase delta) and supply stays at the cap.
   const template2 = buildBlockForMining({
     chain: bigChain,
     mempool,
@@ -328,9 +325,14 @@ test("chain: block reward does not push total supply over MAX_TOTAL_SUPPLY", () 
     extraData: new TextEncoder().encode("supply-over"),
   })!;
   const mined2 = findNonce(template2);
-  const receipt2 = bigChain.acceptBlock(mined2);
-  assert.equal(receipt2.accepted, false, "block exceeding cap should be rejected");
-  assert.match(receipt2.reason ?? "", /supply/);
+  const receipt2 = acceptTestBlock(bigChain,mined2);
+  assert.equal(receipt2.accepted, true, "block past the cap must still be accepted with a zero subsidy");
+  assert.equal(bigChain.tipState.totalSupply(), MAX, "no minting past the 16,000,000 BIC cap");
+  assert.equal(
+    bigChain.tipState.getAccount(miner.address)?.balance,
+    MAX,
+    "coinbase balance unchanged in the zero-reward tail",
+  );
 });
 
 test("chain: reorg consistency — balances, nonces, and mempool remain consistent after fork switch", () => {
@@ -397,9 +399,103 @@ test("chain: invalid difficulty change is rejected", () => {
   // Tamper with difficulty
   const header = { ...template.header, difficulty: template.header.difficulty + 100n };
   const mined = findNonce({ header, transactions: template.transactions });
-  const receipt = chain.acceptBlock(mined);
+  const receipt = acceptTestBlock(chain,mined);
   assert.equal(receipt.accepted, false, "block with wrong difficulty should be rejected");
   assert.match(receipt.reason ?? "", /difficulty/);
+});
+
+test("chain: block with difficulty 0 is rejected without crashing", () => {
+  const { chain, mempool, miner } = fundedChain();
+  const template = buildBlockForMining({
+    chain,
+    mempool,
+    coinbase: miner.address,
+    timestamp: Math.floor(1_700_000_000) + 5,
+    activeReward: BLOCK_REWARD,
+    extraData: new TextEncoder().encode("diff-zero"),
+  })!;
+  // Find a nonce with the valid difficulty first; finding one with
+  // difficulty 0 would throw inside isMiningCandidate.
+  const mined = findNonce(template);
+  // Tamper difficulty to 0 AFTER the nonce search.
+  const zeroDiffBlock = {
+    header: { ...mined.header, difficulty: 0n },
+    transactions: mined.transactions,
+  };
+  let threw = false;
+  let accepted = false;
+  let reason = "";
+  try {
+    const r = acceptTestBlock(chain,zeroDiffBlock);
+    accepted = r.accepted;
+    reason = r.reason ?? "";
+  } catch {
+    threw = true;
+  }
+  assert.equal(threw, false, "acceptBlock must not throw on difficulty 0");
+  assert.equal(accepted, false, "difficulty 0 block must be rejected");
+  assert.match(reason, /difficulty/);
+});
+
+test("chain: block with difficulty below MIN_DIFFICULTY is rejected safely", () => {
+  const { chain, mempool, miner } = fundedChain();
+  const template = buildBlockForMining({
+    chain,
+    mempool,
+    coinbase: miner.address,
+    timestamp: Math.floor(1_700_000_000) + 5,
+    activeReward: BLOCK_REWARD,
+    extraData: new TextEncoder().encode("diff-low"),
+  })!;
+  const mined = findNonce(template);
+  const lowDiffBlock = {
+    header: { ...mined.header, difficulty: -1n },
+    transactions: mined.transactions,
+  };
+  let threw = false;
+  let accepted = false;
+  let reason = "";
+  try {
+    const r = acceptTestBlock(chain,lowDiffBlock);
+    accepted = r.accepted;
+    reason = r.reason ?? "";
+  } catch {
+    threw = true;
+  }
+  assert.equal(threw, false, "acceptBlock must not throw on difficulty below MIN");
+  assert.equal(accepted, false, "difficulty below MIN must be rejected");
+  assert.match(reason, /difficulty/);
+});
+
+test("chain: block with non-bigint difficulty is rejected safely", () => {
+  const { chain, mempool, miner } = fundedChain();
+  const template = buildBlockForMining({
+    chain,
+    mempool,
+    coinbase: miner.address,
+    timestamp: Math.floor(1_700_000_000) + 5,
+    activeReward: BLOCK_REWARD,
+    extraData: new TextEncoder().encode("diff-malformed"),
+  })!;
+  const mined = findNonce(template);
+  // Malformed runtime value: a number instead of a bigint.
+  const malformedDiffBlock = {
+    header: { ...mined.header, difficulty: 0 as unknown as bigint },
+    transactions: mined.transactions,
+  };
+  let threw = false;
+  let accepted = false;
+  let reason = "";
+  try {
+    const r = acceptTestBlock(chain,malformedDiffBlock);
+    accepted = r.accepted;
+    reason = r.reason ?? "";
+  } catch {
+    threw = true;
+  }
+  assert.equal(threw, false, "acceptBlock must not throw on non-bigint difficulty");
+  assert.equal(accepted, false, "non-bigint difficulty must be rejected");
+  assert.match(reason, /difficulty/);
 });
 
 test("chain: modified header (wrong stateRoot) is rejected", () => {
@@ -414,30 +510,32 @@ test("chain: modified header (wrong stateRoot) is rejected", () => {
   })!;
   const header = { ...template.header, stateRoot: "0x" + "ff".repeat(32) };
   const mined = findNonce({ header, transactions: template.transactions });
-  const receipt = chain.acceptBlock(mined);
+  const receipt = acceptTestBlock(chain,mined);
   assert.equal(receipt.accepted, false, "block with wrong stateRoot should be rejected");
   assert.match(receipt.reason ?? "", /stateRoot/);
 });
 
-test("chain: local-clock future limit behavior unchanged (rejects beyond-wall stamps reached via legal +30 steps)", () => {
-  // Genesis sits 290 s in the past so a parent-relative ladder of +30 s steps
-  // reaches the wall-clock tolerance in 19 accepted blocks; the 20th (again
-  // parent+30) satisfies the deterministic parent-relative rules but violates
-  // the pre-existing local-clock policy and must still be rejected here
-  // (quarantine is a later phase, out of scope).
-  const { chain, mempool, miner } = fundedChain(Math.floor(Date.now() / 1000) - 290);
+test("chain: local-clock future limit behavior unchanged (rejects beyond-wall stamps reached via legal +600 steps)", () => {
+  // Genesis sits 900 s in the past so a parent-relative ladder of +600 s steps
+  // (the parent-relative cap) reaches the wall-clock tolerance in 2 accepted
+  // blocks (the second stamping exactly wall+300 — the inclusive boundary);
+  // the third (again parent+600 = wall+900) satisfies the deterministic
+  // parent-relative rules but violates the pre-existing local-clock policy
+  // and must still be rejected here (quarantine is a later phase, out of
+  // scope).
+  const { chain, mempool, miner } = fundedChain(Math.floor(Date.now() / 1000) - 900);
   let tip = chain.tip.block.header;
-  for (let i = 0; i < 19; i++) {
+  for (let i = 0; i < 2; i++) {
     const template = buildBlockForMining({
       chain,
       mempool,
       coinbase: miner.address,
-      timestamp: tip.timestamp + 30,
+      timestamp: tip.timestamp + 600,
       activeReward: BLOCK_REWARD,
       extraData: new TextEncoder().encode(`ladder-${i}`),
     })!;
     const mined = findNonce(template);
-    const receipt = chain.acceptBlock(mined);
+    const receipt = acceptTestBlock(chain,mined);
     assert.equal(receipt.accepted, true, `ladder block ${i}: ${receipt.reason}`);
     tip = chain.tip.block.header;
   }
@@ -446,31 +544,32 @@ test("chain: local-clock future limit behavior unchanged (rejects beyond-wall st
     chain,
     mempool,
     coinbase: miner.address,
-    timestamp: tip.timestamp + 30,
+    timestamp: tip.timestamp + 600,
     activeReward: BLOCK_REWARD,
     extraData: new TextEncoder().encode("beyond-wall"),
   })!;
   const minedBeyond = findNonce(beyond);
-  const receipt = chain.acceptBlock(minedBeyond);
+  const receipt = acceptTestBlock(chain,minedBeyond);
   assert.equal(receipt.accepted, false, "block beyond the local-clock future tolerance must be rejected");
   assert.match(receipt.reason ?? "", /timestamp too far in the future/);
 });
 
 test("chain: block with timestamp within max future is accepted", () => {
-  // Genesis placed near wall time so the +30 s parent-relative cap and the
-  // local future tolerance both hold for the candidate stamp.
-  const { chain, mempool, miner } = fundedChain(Math.floor(Date.now() / 1000) - 25);
+  // Genesis placed exactly one target interval (600 s) behind wall time so
+  // the parent-relative cap (parent+600) and the local future tolerance both
+  // hold for the candidate stamp (it lands at wall clock).
+  const { chain, mempool, miner } = fundedChain(Math.floor(Date.now() / 1000) - 600);
   const template = buildBlockForMining({
     chain,
     mempool,
     coinbase: miner.address,
-    timestamp: chain.tip.block.header.timestamp + 30, // = wall +5, inside the future tolerance
+    timestamp: chain.tip.block.header.timestamp + 600, // ≈ wall, inside the future tolerance
     activeReward: BLOCK_REWARD,
     extraData: new TextEncoder().encode("near-future"),
   })!;
   assert.equal(template!.header.timestamp <= Math.floor(Date.now() / 1000) + MAX_FUTURE_TIMESTAMP_SECONDS, true);
   const mined = findNonce(template);
-  const receipt = chain.acceptBlock(mined);
+  const receipt = acceptTestBlock(chain,mined);
   assert.equal(receipt.accepted, true, "block with timestamp within max future should be accepted");
 });
 
@@ -495,7 +594,7 @@ test("chain: duplicate transactions in a block are rejected", () => {
     transactions: [tx, tx],
   };
   const mined = findNonce(block);
-  const receipt = chain.acceptBlock(mined);
+  const receipt = acceptTestBlock(chain,mined);
   assert.equal(receipt.accepted, false, "block with duplicate tx should be rejected");
 });
 
@@ -523,7 +622,7 @@ test("chain: rejected block leaves no partial state changes", () => {
     transactions: [...template.transactions, badTx],
   };
   const mined = findNonce(block);
-  const receipt = chain.acceptBlock(mined);
+  const receipt = acceptTestBlock(chain,mined);
   assert.equal(receipt.accepted, false, "block with invalid tx should be rejected");
 
   // State should be unchanged
@@ -532,7 +631,7 @@ test("chain: rejected block leaves no partial state changes", () => {
   assert.equal(chain.tip.number, 0, "tip unchanged after rejection");
 });
 
-test("chain: parent-relative stamps — exactly +30 accepted, +31 rejected, earlier rejected", () => {
+test("chain: parent-relative stamps — exactly +600 accepted (cap), +601 rejected, earlier rejected", () => {
   const { chain, mempool, miner } = fundedChain();
   const build = (ts: number, tag: string) =>
     buildBlockForMining({
@@ -544,24 +643,24 @@ test("chain: parent-relative stamps — exactly +30 accepted, +31 rejected, earl
       extraData: new TextEncoder().encode(tag),
     })!;
 
-  // +30 accepted by the deterministic parent-relative rule.
-  const at30 = build(chain.tip.block.header.timestamp + 30, "step30");
-  const at30Receipt = chain.acceptBlock(findNonce(at30));
-  assert.equal(at30Receipt.accepted, true, `parent+30 must be accepted: ${at30Receipt.reason}`);
+  // +600 accepted by the deterministic parent-relative rule (cap boundary).
+  const at600 = build(chain.tip.block.header.timestamp + 600, "step600");
+  const at600Receipt = acceptTestBlock(chain,findNonce(at600));
+  assert.equal(at600Receipt.accepted, true, `parent+600 must be accepted: ${at600Receipt.reason}`);
 
-  // +31 rejected on the next block (parent is the +30 block).
+  // +601 rejected on the next block (parent is the +600 block).
   const tipTs = chain.tip.block.header.timestamp;
-  const manualLate = build(tipTs + 31, "step31");
-  const lateHeader = { ...manualLate.header, timestamp: tipTs + 31 };
+  const manualLate = build(tipTs + 601, "step601");
+  const lateHeader = { ...manualLate.header, timestamp: tipTs + 601 };
   const lateMined = findNonce({ header: lateHeader, transactions: manualLate.transactions });
-  const lateReceipt = chain.acceptBlock(lateMined);
-  assert.equal(lateReceipt.accepted, false, "parent+31 must be rejected");
+  const lateReceipt = acceptTestBlock(chain,lateMined);
+  assert.equal(lateReceipt.accepted, false, "parent+601 must be rejected");
   assert.match(lateReceipt.reason ?? "", /after parent/);
 
   // Earlier than parent rejected.
   const earlyHeader = { ...manualLate.header, timestamp: tipTs - 1 };
   const earlyMined = findNonce({ header: earlyHeader, transactions: manualLate.transactions });
-  const earlyReceipt = chain.acceptBlock(earlyMined);
+  const earlyReceipt = acceptTestBlock(chain,earlyMined);
   assert.equal(earlyReceipt.accepted, false, "earlier-than-parent must be rejected");
   assert.match(earlyReceipt.reason ?? "", /earlier than parent/);
 });
@@ -587,20 +686,19 @@ test("chain: non-retarget heights inherit the parent difficulty", () => {
   assert.equal(template!.header.difficulty, BigInt(1), "inherited difficulty equals the genesis difficulty");
 });
 
-test("chain: 60 equal-stamp blocks RAISE difficulty at the first retarget (regression)", () => {
+test("chain: 1536 equal-stamp blocks RAISE difficulty by exactly 4x at the first retarget (regression)", () => {
   const { chain, mempool, miner } = fundedChain();
   const gTs = chain.tip.block.header.timestamp;
-  // Under the old strictly-increasing rule this was impossible: equal stamps
-  // were rejected outright. Under the non-decreasing rule all 60 blocks carry
-  // the genesis second; the first retarget measures elapsed = 5 (virtual
-  // bootstrap anchors at h−9..h−1 give LM(old) = G−5, LM(new) = G), clamps to
-  // 15, and difficulty rises 1 -> MIN_DIFFICULTY.
-  for (let hCheck = 1; hCheck <= 60; hCheck++) {
+  // All 1536 blocks carry the genesis second (equal stamps are valid under
+  // the non-decreasing rule). The first retarget (h = 1536) measures
+  // LM(new) = G, LM(old) = G − 3000 (virtual anchors at heights −9..−1/0),
+  // elapsed 3000 → clamped to 230,400 → difficulty rises 1 → 4 (exact 4x).
+  for (let hCheck = 1; hCheck <= 1536; hCheck++) {
     const receipt = mineAndSubmit(chain, mempool, miner.address, gTs);
     assert.equal(receipt.accepted, true, `block ${hCheck}: ${receipt.reason}`);
   }
-  assert.equal(chain.tip.number, 60);
+  assert.equal(chain.tip.number, 1536);
   const finalDifficulty = chain.tip.block.header.difficulty;
-  assert.equal(finalDifficulty, BigInt(MIN_DIFFICULTY), "equal-stamp window must raise difficulty (clamped to MIN)");
+  assert.equal(finalDifficulty, 4n, "equal-stamp window must raise difficulty by the exact 4x bound");
   assert.equal(finalDifficulty > 1n, true, "regression: equal-second blocks cause a real difficulty increase");
 });

@@ -17,8 +17,9 @@ import type { Transaction } from "../tx/transaction.js";
 import { recoverTransactionSender, validateTransaction, txHash } from "../tx/transaction.js";
 import { Journal, WorldState } from "../state/world.js";
 import { TransactionExecutor, type ExecutionContext, type TxExecutionReceipt } from "../tx/execute.js";
-import { nextDifficulty, verifyHeaderPoW, virtualAnchorTimestamp } from "../consensus/pow.js";
-import { BLOCK_REWARD, DIFFICULTY_RETARGET_INTERVAL, MAX_BLOCK_BYTES, MAX_FUTURE_TIMESTAMP_SECONDS, MAX_TIMESTAMP_STEP_SECONDS, MAX_TOTAL_SUPPLY, MAX_PENDING_BLOCKS } from "../config/params.js";
+import { nextDifficulty, verifyHeaderPoW, RETARGET_OLDEST_ANCHOR_OFFSET, virtualAnchorTimestamp } from "../consensus/pow.js";
+import { cappedReward } from "../consensus/issuance.js";
+import { BLOCK_REWARD, DIFFICULTY_RETARGET_INTERVAL, MAX_BLOCK_BYTES, MAX_FUTURE_TIMESTAMP_SECONDS, MAX_TIMESTAMP_STEP_SECONDS, MAX_TOTAL_SUPPLY, MAX_PENDING_BLOCKS, MIN_DIFFICULTY } from "../config/params.js";
 import { isValidAddress } from "../crypto/keys.js";
 import { appendLedger, readLedger } from "./persist.js";
 import { buildGenesis, type GenesisConfig, type GenesisManifest, genesisManifest } from "./genesis.js";
@@ -47,6 +48,18 @@ export class Blockchain {
   private readonly byHeight = new Map<number, string>(); // best chain only
   private readonly children = new Map<string, string[]>(); // parentHash -> child hashes
   private readonly pending = new Map<string, Block>(); // blocks awaiting their parent
+  /** Best-chain timestamp ledger (see reconcileBestChainLedger): height →
+   *  timestamp/hash of the CURRENT best chain, so retarget anchors remain
+   *  available after fork-retention pruning prunes canonical ancestors. */
+  private readonly bestChainHashes = new Map<number, string>();
+  private readonly bestChainTimestamps = new Map<number, number>();
+  /** Heights below this are excluded from the ledger fallback: an interrupted
+   *  fork reconciliation cannot verify that the ledger matches the winning
+   *  branch there (fail-closed instead of using timestamps that may be stale). */
+  private bestChainTsFloor = 0;
+  /** Winning fork block whose best-chain ledger update was deferred to the
+   *  post-selection reconciliation. */
+  private pendingBestLedger: ChainIndexEntry | null = null;
   private bestHash!: string;
   private bestBlock!: Block;
   private bestState!: WorldState;
@@ -72,6 +85,8 @@ export class Blockchain {
     });
     this.byHeight.set(0, hash);
     this.children.set(EMPTY_HASH, [hash]);
+    this.bestChainHashes.set(0, hash);
+    this.bestChainTimestamps.set(0, genesis.block.header.timestamp);
     this.genesisManifestValue = genesisManifest(config);
   }
 
@@ -135,6 +150,10 @@ export class Blockchain {
   /**
    * Validates and imports a block (possibly out of order). Retries pending
    * children afterwards so gap-filling converges.
+   *
+   * Production entry point: always verifies the header PoW. Tests that need to
+   * exercise other validation rules without performing real PoW must use
+   * {@link acceptBlockForTesting} instead.
    */
   acceptBlock(block: Block): ImportedReceipt & { accepted: boolean } {
     const preTip = this.tip.hash;
@@ -145,7 +164,10 @@ export class Blockchain {
       this.tryImport(candidate);
     }
     const result = this.tip;
-    const acceptedNow = this.byHash.has(blockHash(block.header));
+    // Use tryImport's acceptance result rather than re-hashing the block header,
+    // which would throw for malformed headers (e.g. negative difficulty) that
+    // tryImport already rejected.
+    const acceptedNow = first.accepted === true;
     return {
       accepted: acceptedNow,
       reason: first.reason && !acceptedNow ? first.reason : undefined,
@@ -155,7 +177,37 @@ export class Blockchain {
     };
   }
 
-  private tryImport(block: Block): ImportedReceipt {
+  /**
+   * Test-only block acceptance that skips the PoW hash check while still
+   * running every other validation rule (difficulty structure, retarget, gas,
+   * coinbase, transactionsRoot, state execution, stateRoot, supply cap,
+   * duplicate block, timestamps).
+   *
+   * This is intentionally NOT part of the production `acceptBlock` API and must
+   * never be called by node, networking, mining, or any non-test code. Real
+   * PoW validation is covered by test/pow.test.ts and by the production
+   * `acceptBlock` path above.
+   */
+  acceptBlockForTesting(block: Block): ImportedReceipt & { accepted: boolean } {
+    const preTip = this.tip.hash;
+    const first = this.tryImport(block, true);
+    const pendingSnapshot = [...this.pending.values()];
+    this.pending.clear();
+    for (const candidate of pendingSnapshot) {
+      this.tryImport(candidate, false);
+    }
+    const result = this.tip;
+    const acceptedNow = first.accepted === true;
+    return {
+      accepted: acceptedNow,
+      reason: first.reason && !acceptedNow ? first.reason : undefined,
+      reorganized: result.hash !== preTip,
+      tipNumber: result.number,
+      tipHash: result.hash,
+    };
+  }
+
+  private tryImport(block: Block, skipPoW = false): ImportedReceipt {
     const reject = (reason: string): ImportedReceipt => ({ ...this.tipInfo(), reorganized: false, reason });
     const parentHash = block.header.parentHash;
     const parent = this.byHash.get(parentHash);
@@ -181,8 +233,23 @@ export class Blockchain {
     if (block.header.timestamp > Math.floor(Date.now() / 1000) + MAX_FUTURE_TIMESTAMP_SECONDS) {
       return reject("timestamp too far in the future");
     }
-    const pow = verifyHeaderPoW(block.header, { nonce: block.header.nonce });
-    if (!pow.ok) return reject(pow.reason);
+    // Inexpensive structural check before expensive PoW crypto: reject
+    // malformed difficulty values before they reach difficultyToTarget,
+    // which throws on values < 1. This prevents an uncaught exception
+    // from escaping the block-import path on invalid network input.
+    const difficulty = block.header.difficulty;
+    if (
+      typeof difficulty !== "bigint" ||
+      difficulty < BigInt(MIN_DIFFICULTY)
+    ) {
+      return reject(`invalid difficulty: ${difficulty}`);
+    }
+    // skipPoW is true only from the test-only acceptBlockForTesting path.
+    // Production acceptBlock always calls tryImport(block) with skipPoW = false.
+    const pow: { ok: boolean; hash: string; reason?: string } = skipPoW
+      ? { ok: true, hash: "" }
+      : verifyHeaderPoW(block.header, { nonce: block.header.nonce });
+    if (!pow.ok) return reject(pow.reason ?? "PoW validation failed");
 
     // Difficulty retarget: anchors come from THIS branch (the parent chain the
     // block extends), never from the canonical tip. The new sample includes
@@ -245,19 +312,22 @@ export class Blockchain {
       return reject(`gasUsed ${gasUsedTotal} != header ${block.header.gasUsed}`);
     }
 
-    // Block reward (dev issuance, decision D-1 open) + supply cap.
-    if (BLOCK_REWARD > 0n) {
-      // state.totalSupply() reads the backing state, not the journal overlay
-      // where the reward is staged, so check against cap explicitly.
-      if (state.totalSupply() + BLOCK_REWARD > MAX_TOTAL_SUPPLY) {
-        return reject("max total supply would be exceeded");
-      }
+    // Block reward (dev issuance, decision D-1 open) + supply cap. The cap is
+    // enforced by clamping the subsidy to the remaining mintable supply
+    // (cappedReward): the cap is a hard invariant, blocks at the boundary
+    // mint the exact remainder, and past the cap the subsidy is zero — no
+    // rejection and no mint overshoot. Transaction fees are separate (they
+    // move existing balance, not minted supply).
+    if (state.totalSupply() > MAX_TOTAL_SUPPLY) {
+      // Defensive: unreachable by construction (allocations + capped rewards).
+      return reject("max total supply exceeded");
+    }
+    const reward = cappedReward(BLOCK_REWARD, state.totalSupply());
+    if (reward > 0n) {
       const journal = new Journal(state);
       const cb = journal.ensureAccount(block.header.coinbase);
-      cb.balance += BLOCK_REWARD;
+      cb.balance += reward;
       journal.applyTo(state);
-    } else if (state.totalSupply() > MAX_TOTAL_SUPPLY) {
-      return reject("max total supply exceeded");
     }
     if (state.stateRoot() !== block.header.stateRoot) {
       return reject("stateRoot mismatch");
@@ -272,8 +342,20 @@ export class Blockchain {
     const siblings = this.children.get(parentHash) ?? [];
     siblings.push(hash);
     this.children.set(parentHash, siblings);
+    // Best-chain timestamp ledger maintenance. A canonical extension (child
+    // of the current best tip) appends one entry; a winning fork replaces the
+    // overwritten region through reconciliation in selectBestChain. The
+    // ledger lets retarget anchors survive fork-retention pruning (anchor
+    // depth = INTERVAL + 9 > FORK_RETENTION since the interval redesign).
+    if (parentHash === this.bestHash) {
+      this.bestChainHashes.set(block.header.number, hash);
+      this.bestChainTimestamps.set(block.header.number, block.header.timestamp);
+    } else if (block.header.number > this.bestBlock.header.number) {
+      this.pendingBestLedger = entry;
+    }
     this.pruneDeepForks();
     const reorganized = this.selectBestChain();
+    this.reconcileBestChainLedger();
     if (this.ledgerFile) appendLedger(this.ledgerFile, encodeBlock(block));
     if (reorganized && this.mempoolRef) {
       const known = block.transactions.map((tx: Transaction) => txHash(tx));
@@ -284,7 +366,7 @@ export class Blockchain {
 
   /**
    * Builds a timestamp lookup over the branch that ends at `parent` (the
-   * block's parent), covering retarget anchor heights [h-69, h-1]. Heights
+   * block's parent), covering retarget anchor heights [h - (INTERVAL+9), h-1]. Heights
    * below zero (first retarget only) are virtual anchors derived from the
    * genesis header timestamp; height h resolves to the block being validated.
    * The walk follows parent hashes — never the canonical best chain — so a
@@ -305,7 +387,7 @@ export class Blockchain {
     const genesisTimestamp = this.config.timestamp; // genesis header timestamp source
     const branchTs = new Map<number, number>();
     let cursor: ChainIndexEntry | undefined = parent;
-    while (cursor && cursor.block.header.number >= blockHeight - 69) {
+    while (cursor && cursor.block.header.number >= blockHeight - RETARGET_OLDEST_ANCHOR_OFFSET) {
       branchTs.set(cursor.block.header.number, cursor.block.header.timestamp);
       if (cursor.block.header.number === 0) break;
       cursor = this.byHash.get(cursor.block.header.parentHash);
@@ -314,8 +396,17 @@ export class Blockchain {
       if (height < 0) return virtualAnchorTimestamp(height, genesisTimestamp);
       if (height === blockHeight) return blockTimestamp;
       const ts = branchTs.get(height);
-      if (ts === undefined) throw new Error(`no block on this branch at anchor height ${height}`);
-      return ts;
+      if (ts !== undefined) return ts;
+      // Fork-retention pruning may have removed canonical ancestors the walk
+      // needed. Fall back to the best-chain timestamp ledger ONLY when the
+      // parent is the canonical best tip (its ancestral path then matches the
+      // ledger); any other branch must fail deterministically instead of
+      // silently reading timestamps from a different branch.
+      if (parent.hash === this.bestHash) {
+        const ledgerTs = this.getBestChainTimestampAt(height);
+        if (ledgerTs !== undefined) return ledgerTs;
+      }
+      throw new Error(`no block on this branch at anchor height ${height}`);
     };
   }
 
@@ -353,6 +444,54 @@ export class Blockchain {
     this.bestState = best.state;
     this.rebuildBestIndex();
     return true;
+  }
+
+  /**
+   * Keeps the best-chain timestamp ledger in agreement with fork selection.
+   * Called after every successful import: no-op normally (canonical
+   * extensions already appended themselves); when a fork won the tip, the
+   * overwritten region is re-walked from the new best chain. The walk stops
+   * at the first height whose ledger hash already matches (verified shared
+   * prefix below the divergence point stays valid). If the walk cannot reach
+   * a verified prefix because retention pruned the fork's lower prefix, the
+   * ledger below that point is treated as unverifiable: the floor excludes
+   * it from fallback use — fail-closed, never silently mis-stamped.
+   */
+  private reconcileBestChainLedger(): void {
+    const forkWinner = this.pendingBestLedger;
+    this.pendingBestLedger = null;
+    if (!forkWinner) return;
+    if (this.bestChainHashes.get(forkWinner.block.header.number) === forkWinner.hash) return;
+    let cursor: ChainIndexEntry | undefined = forkWinner;
+    let deepestUnverified = -1;
+    while (cursor) {
+      const height = cursor.block.header.number;
+      if (this.bestChainHashes.get(height) === cursor.hash) {
+        deepestUnverified = -1; // verified shared prefix — nothing below is stale
+        break;
+      }
+      this.bestChainHashes.set(height, cursor.hash);
+      this.bestChainTimestamps.set(height, cursor.block.header.timestamp);
+      deepestUnverified = height; // last height written on an unverified path
+      cursor = this.byHash.get(cursor.block.header.parentHash);
+    }
+    if (cursor === undefined) {
+      // The walk ended without reaching a verified prefix: heights below the
+      // deepest written height may still carry stale entries.
+      if (deepestUnverified >= 0 && this.bestChainTsFloor < deepestUnverified) {
+        this.bestChainTsFloor = deepestUnverified;
+      }
+    }
+  }
+
+  /**
+   * Timestamp on the CURRENT best chain at `height`, when the ledger covers
+   * that height (heights below the verification floor are excluded). Only
+   * meaningful for lookups whose parent block IS the best-chain tip.
+   */
+  getBestChainTimestampAt(height: number): number | undefined {
+    if (height < this.bestChainTsFloor) return undefined;
+    return this.bestChainTimestamps.get(height);
   }
 
   private rebuildBestIndex(): void {

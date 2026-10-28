@@ -11,7 +11,12 @@
  * deployments fail loudly in handshake and genesis-hashing.
  */
 
-/** Bumped whenever any dev default below changes. */
+/** Bumped whenever any dev default below changes.
+ *  NOTE: this value is intentionally NOT bumped in the consensus-redesign
+ *  task because the parameter-version bump is coupled to a genesis/protocol
+ *  activation review (activation requires a coordinated version bump — see
+ *  the redesign report). While it stays "0.0.1-dev", code must not silently
+ *  treat dev chains as production chains. */
 export const DEV_PARAM_VERSION = "0.0.1-dev";
 
 /** Number of base units per BIC: dev default 18 decimals (decision D-2 open). */
@@ -22,29 +27,48 @@ export function BIC(count: bigint): bigint {
   return count * 10n ** DECIMALS;
 }
 
-/** Fixed maximum coin supply — DEV DEFAULT (decision D-1 open). */
-export const MAX_TOTAL_SUPPLY = 100_000_000n * BIC(1n);
+/** Fixed maximum coin supply: 16,000,000 BIC (task-approved target;
+ *  D-1 remains open for the issuance schedule inside this cap). */
+export const MAX_TOTAL_SUPPLY = 16_000_000n * BIC(1n);
 
 /** Network chain id: dev default 901_291 (EIP-155 style, decision D-3 open). */
 export const DEV_CHAIN_ID = 901291;
 
 /** Consensus/genesis dev defaults (decisions D-4..D-8 open). */
-export const GENESIS_DIFFICULTY = 1; // effectively instant mining for dev chains
-export const TARGET_BLOCK_TIME_SECONDS = 1; // dev: sub-minute stragglers OK
-export const DIFFICULTY_RETARGET_INTERVAL = 60; // blocks between retargets
-/** Difficulty floor: Phase 1 retarget clamp bound (approved value 1024 = 2^10;
- *  decision D-8 open). NOTE: GENESIS_DIFFICULTY (1) is intentionally below this
- *  floor until the separate genesis-recalibration phase; pre-first-retarget
- *  blocks inherit it and every retarget result is clamped up to this bound. */
-export const MIN_DIFFICULTY = 1024;
+/** Initial mining difficulty — the approved target is "difficulty 1.0"
+ *  (task-approved consensus redesign). With the difficulty→target mapping in
+ *  src/consensus/pow.ts, difficulty 1 means target = 2^256, i.e. EVERY digest
+ *  passes: instant dev mining while the rules stay well-defined. */
+export const GENESIS_DIFFICULTY = 1;
+/** Target block interval: 600 s = 10 minutes (task-approved target). */
+export const TARGET_BLOCK_TIME_SECONDS = 600;
+/** Retarget every 1,536 blocks (task-approved target). */
+export const DIFFICULTY_RETARGET_INTERVAL = 1536;
+/** Difficulty floor. The approved per-retarget bounds are relative (max 4x up,
+ *  max down to one quarter of the previous difficulty); the only absolute
+ *  floor is 1 = the initial difficulty 1.0 (griefing/persistence floor). */
+export const MIN_DIFFICULTY = 1;
 export const MAX_DIFFICULTY = 4_294_967_295; // dev cap to keep mining bounded
+
+/** Bitcoin mainnet difficulty-1 proof-of-work limit: compact target 0x1d00ffff.
+ *  At difficulty 1 this is the maximum permitted target, so difficulty 1
+ *  requires real proof of work (~2^32 expected hashes) rather than accepting
+ *  every digest. */
+export const POW_LIMIT = 0x00000000ffff0000000000000000000000000000000000000000000000000000n;
 
 /** Maximum seconds a block timestamp may exceed its PARENT's timestamp
  *  (parent-relative bound, Phase 1 consensus rule). Equal timestamps are
- *  permitted; 30 s after the parent is valid, 31 s is rejected. */
-export const MAX_TIMESTAMP_STEP_SECONDS = 30;
+ *  permitted. Derived from the target block interval: a stamp may not get
+ *  ahead of its parent by more than one target interval (600 s). This pairs
+ *  with MAX_FUTURE_TIMESTAMP_SECONDS which bounds stamps relative to the
+ *  local wall clock. */
+export const MAX_TIMESTAMP_STEP_SECONDS = TARGET_BLOCK_TIME_SECONDS;
 
-/** Coinbase block reward: dev default, subject to decision D-1 (issuance). */
+/** Coinbase block reward: the ACTIVE dev issuance — explicitly identified:
+ *  2 BIC per block, no halving, no tail (this is NOT the target production
+ *  schedule; see src/consensus/issuance.ts for the prepared configurable
+ *  schedule whose initial reward and halving interval are intentionally
+ *  undecided; decision D-1 open). */
 export const BLOCK_REWARD = BIC(2n);
 
 /** Gas schedule: dev defaults (decision D-9 open); nominal EVM-style costs. */
@@ -91,7 +115,7 @@ export const DEV_DISCOVERY_DEFAULTS: DevDiscoveryDefaults = {
 };
 
 /** PoW mining resource limit: dev default is a moderate CPU budget. */
-export const DEV_MINING_HASH_RATE = 512; // keccak/sec budget per node (throttled)
+export const DEV_MINING_HASH_RATE = 512; // sha256d/sec budget per node (throttled)
 export const DEV_MINING_CONSENT_FILE = "mining-consent.json";
 
 /** Runtime tuning for the dev node (not consensus-relevant). */

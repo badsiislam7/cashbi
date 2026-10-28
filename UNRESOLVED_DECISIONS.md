@@ -149,3 +149,34 @@ network**, notably:
 - unencrypted keyfile storage in the data directory.
 
 Each must be re-evaluated against D-… before launch.
+
+### D-22 — Initial block reward — OPEN
+Dev default remains `BLOCK_REWARD = 2 BIC` per block, flat (no halving, no
+tail); this is explicitly dev-only and is NOT a production decision
+(`src/config/params.ts`, `src/consensus/issuance.ts`). The production
+issuance schedule (initial reward, halving interval, tail behavior) must not
+be defaulted anywhere — `scheduleRewardAt` rejects an unconfigured schedule
+with an explicit error rather than inventing a value.
+
+### D-23 — Halving interval — OPEN
+No halving interval may be assumed or invented (task rule). The issuance
+framework accepts `halvingInterval: number | null` with explicit validation;
+`null` is the current state and must not be coerced into a value.
+
+### D-24 — Consensus parameter-version activation — OPEN
+`DEV_PARAM_VERSION` intentionally stays `"0.0.1-dev"` in this task: the bump
+is coupled to genesis/protocol activation review. HELLO rejects a present but
+differing `paramVersion` (additive, non-breaking); peers that omit the field
+(pre-2 protocol) are still accepted until enforcement is hardened at launch.
+Genesis-hash alone does NOT change when consensus parameters change, so the
+version string is the only wire-level protection against silent rule mixing
+until activation.
+
+### D-25 — Best-chain ledger floor limits for deep forks — OPEN
+The retarget fix adds `bestChainTimestamps`/`bestChainHashes` plus
+`reconcileBestChainLedger()` so retarget anchors survive fork-retention
+pruning (anchor depth INTERVAL + 9 > FORK_RETENTION). The verified-shared-
+prefix walk raises `bestChainTsFloor` to the deepest unverified height when
+the walk is interrupted (fail-closed). Additional bounds for very deep or
+long forks — e.g. ledger size caps, floor persistence across restarts — are
+undecided.
