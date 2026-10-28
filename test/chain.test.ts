@@ -4,10 +4,10 @@ import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BIC, DEV_CHAIN_ID, BLOCK_REWARD, MAX_FUTURE_TIMESTAMP_SECONDS, MAX_TOTAL_SUPPLY } from "../src/config/params.js";
-import { Blockchain, type PowValidator } from "../src/chain/blockchain.js";
+import { Blockchain } from "../src/chain/blockchain.js";
 import { buildBlockForMining, buildBlockOn } from "../src/mining/candidate.js";
 import { emptyGenesisConfig } from "../src/chain/genesis.js";
-import { blockHash, decodeBlock } from "../src/chain/block.js";
+import { blockHash, decodeBlock, type BlockHeader } from "../src/chain/block.js";
 import { randomAccount, signTransaction, txHash } from "../src/tx/transaction.js";
 import { Mempool } from "../src/tx/mempool.js";
 import { readLedger } from "../src/chain/persist.js";
@@ -19,19 +19,25 @@ interface ChainSet {
   miner: ReturnType<typeof randomAccount>;
 }
 
-/** Test-only PoW bypass validator: always accepts. Injected only into test
- *  chains constructed by fundedChain(); production node/RPC/mining/P2P code
- *  constructs Blockchain without this option and always verifies real PoW. */
-const TEST_POW_VALIDATOR: PowValidator = () => ({ ok: true, hash: "" });
+/** Test-only Blockchain subclass that skips PoW validation via checkPoW()
+ *  so chain-validation rule tests can run without performing ~2^32 hashes per
+ *  block at difficulty 1 under POW_LIMIT. This subclass exists ONLY in test
+ *  code; production node/RPC/mining/P2P code constructs plain Blockchain and
+ *  always verifies real PoW. */
+class BlockchainForTesting extends Blockchain {
+  protected checkPoW(_header: BlockHeader, _nonce: bigint): import("../src/chain/blockchain.js").ImportedReceipt | null {
+    return null; // test-only: skip PoW hash check; all other rules still apply
+  }
+}
 
 function fundedChain(genesisTs = Math.floor(1_700_000_000)): ChainSet {
   const user = randomAccount();
   const miner = randomAccount();
   const genesis = emptyGenesisConfig(genesisTs);
   genesis.allocations = [{ address: user.address, balance: BIC(10_000n) }];
-  // Test chain: PoW bypass injected at construction. Production code never
-  // passes this option, so production block import always verifies real PoW.
-  const chain = new Blockchain(genesis, { powValidator: TEST_POW_VALIDATOR });
+  // Test chain: uses BlockchainForTesting which skips PoW validation.
+  // Production code constructs plain Blockchain and always verifies real PoW.
+  const chain = new BlockchainForTesting(genesis);
   const mempool = new Mempool();
   chain.mempoolRef = mempool;
   return { chain, mempool, user, miner };
@@ -307,7 +313,7 @@ test("chain: block reward clamp — exact remainder at the 16,000,000 BIC cap, t
   // devnet balances only — bounds the test length).
   const bigGenesis = emptyGenesisConfig(Math.floor(1_700_000_000));
   bigGenesis.allocations = [{ address: miner.address, balance: MAX - BLOCK_REWARD }];
-  const bigChain = new Blockchain(bigGenesis, { powValidator: TEST_POW_VALIDATOR });
+  const bigChain = new BlockchainForTesting(bigGenesis);
   assert.equal(bigChain.tipState.totalSupply(), MAX - BLOCK_REWARD);
 
   const template = buildBlockForMining({

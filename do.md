@@ -1,83 +1,70 @@
-# CashBI — Complete PoW Test Isolation and Valid-Header Verification
+# CashBI — Harden PoW Validator Construction and Test Boundaries
 
 Repository: `/workspaces/codespaces-blank`
 
 ## Objective
 
-Address the remaining security and test-coverage gaps identified in the 2026-10-28 PoW audit report.
+Perform a narrowly scoped security review of the constructor-injected `PowValidator` introduced in the latest PoW repair. Determine whether the current design provides a sufficiently clear production/test boundary, and repair it if necessary.
 
-### 1. Inspect the Actual API Boundary
+## 1. Audit Construction Paths
 
-Inspect `src/chain/blockchain.ts` and all callers of `acceptBlockForTesting()`, `tryImport()`, and `acceptBlock()`.
+Inspect every `new Blockchain(...)` call and every `PowValidator` reference across production source, tests, CLI, node startup, ledger recovery, mining, and P2P code.
 
-The current report says `acceptBlockForTesting()` is a method on the production `Blockchain` class. Do not assume that naming or documentation makes it inaccessible to production callers.
+Confirm that all production-created chains always use `verifyHeaderPoW`.
 
-Determine whether ordinary production code can invoke this method.
+Determine whether any production-reachable constructor or factory allows a caller to inject an always-accepting validator.
 
-### 2. Truly Isolate Test-Only PoW Bypass
+Do not rely solely on comments, naming, or the claim that production callers currently omit the option.
 
-Remove the test bypass from the public production API surface.
+## 2. Harden the Boundary if Needed
 
-Use a safe design such as a test-only fixture, injected validation dependency restricted to test construction, or another architecture that ensures production node, RPC, mining, ledger-recovery, and P2P code cannot accidentally disable PoW.
+If arbitrary validator injection is exposed through the normal production constructor, refactor the design to make the production path explicit and safe.
 
-Do not merely rename the bypass method.
+Keep test support separate from normal production construction. Choose the smallest architecture consistent with the existing codebase, and document the boundary.
 
-Production block import must always perform actual PoW verification.
+Do not simply rename the injection option. Do not introduce global mutable state, environment-variable bypasses, or a production fast-PoW mode.
 
-Keep tests for unrelated chain-validation rules fast without weakening production consensus.
+Keep fast tests for chain-validation rules that do not need real mining, while ensuring ordinary production block imports always use actual PoW verification.
 
-If genuine isolation requires a larger architectural change, stop and report the smallest safe design rather than introducing an insecure workaround.
+## 3. Add Regression Tests
 
-### 3. Add a Precomputed Valid-PoW Test Vector
+Add tests proving that:
 
-The current tests prove that an invalid nonce is rejected, but do not prove that a valid block passes the normal production `acceptBlock()` path.
+- A production-created `Blockchain` rejects a block with invalid PoW.
+- Production node and P2P import paths do not accept a test-only validator.
+- Test fixtures used for non-PoW chain validation remain isolated from normal production construction.
+- Existing difficulty and target-boundary tests remain intact.
 
-Add a deterministic, precomputed valid-PoW header fixture containing:
-- Exact header fields and encoding.
-- Exact nonce.
-- Exact computed PoW digest.
-- Exact difficulty and target.
-- Expected verification result.
+Audit Genesis construction separately. Document its current PoW-validation behavior, but do not change Genesis fields or initialization in this task.
 
-Verify the vector against the actual consensus implementation and independently reproduce the digest/target comparison where practical.
+A valid-PoW acceptance vector and real P2P block propagation remain open coverage gaps unless they can be addressed safely without changing consensus rules or spending an impractical amount of time mining. Do not claim those tests exist unless they genuinely do.
 
-Do not perform billions of hashes during unit tests. Do not fabricate a valid nonce or treat the Genesis nonce as valid without verification.
-
-Use the vector to test the ordinary production PoW verification path. If a complete valid block is required to test `acceptBlock()`, construct one whose remaining consensus fields and state transitions are also valid.
-
-If a valid fixture cannot be produced within the task, document the blocker accurately and do not claim valid-PoW acceptance coverage.
-
-### 4. P2P Coverage
-
-Do not claim actual block propagation coverage unless a block is sent through the real P2P reception path and accepted by the receiving node's normal production validation path.
-
-If feasible, use the valid fixture to test successful propagation and an invalid fixture to test rejection. Otherwise, retain an explicit documented coverage gap.
-
-### 5. Preserve Consensus and Repository State
+## 4. Preserve Consensus and Repository State
 
 Do not change:
-- `POW_LIMIT` or PoW hash construction.
+- POW_LIMIT or PoW hash construction.
 - Difficulty or retarget rules.
-- Chain ID, supply, rewards, or halving policy.
+- Chain ID 901291.
+- Maximum supply of 16,000,000 BIC.
+- Reward or halving policy.
 - Genesis fields, nonce, or hash.
-- `DEV_PARAM_VERSION` or handshake rules.
+- DEV_PARAM_VERSION or handshake rules.
 
-Do not mine Genesis, activate parameters, commit, push, deploy, or perform destructive Git operations.
+Do not mine Genesis, commit, push, deploy, or perform destructive Git operations. Preserve all existing modifications and untracked files.
 
-Preserve all existing modifications and untracked files.
-
-### 6. Verify and Report
+## 5. Verify
 
 Run:
-- Focused PoW tests.
-- Chain tests.
+- Focused PoW and chain tests.
 - Node and integration tests.
 - Full `npm test`.
 - `npx tsc --noEmit`.
 - `npm run lint`.
 - `npm run security:check`.
 
-Inspect the final diff and search for every remaining PoW bypass. Report whether the test bypass is genuinely inaccessible through production APIs, whether valid PoW acceptance was tested, and whether actual P2P block propagation was exercised.
+Inspect the final diff and report every production construction path, any remaining test-only injection surface, test results, and outstanding valid-PoW/P2P coverage gaps.
+
+Do not claim independent verification beyond checks actually performed.
 
 Stop after this task.
 

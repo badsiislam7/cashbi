@@ -32,13 +32,10 @@ export interface ImportedReceipt {
   tipHash: string;
 }
 
-/** Proof-of-work validation function. Production uses verifyHeaderPoW;
- *  tests may inject a bypass validator that always accepts.
- */
-export type PowValidator = (
-  header: BlockHeader,
-  proof: { nonce: bigint },
-) => { ok: boolean; hash: string; reason?: string };
+/** Production proof-of-work validator signature. Tests that need to bypass
+ *  PoW must subclass Blockchain and override tryImport; they must not inject
+ *  a validator through the production constructor. */
+export type PowValidator = typeof verifyHeaderPoW;
 
 interface ChainIndexEntry {
   block: Block;
@@ -76,15 +73,11 @@ export class Blockchain {
   private ledgerFile: string | null = null;
   /** Injected by node wiring so accepted txs are dropped from mempools. */
   mempoolRef: { remove(hash: string): void } | null = null;
-  /** PoW validator: production uses verifyHeaderPoW; tests may inject a bypass. */
-  private readonly powValidator: PowValidator;
 
   constructor(
     private readonly config: GenesisConfig,
-    opts?: { powValidator?: PowValidator },
   ) {
     this.executor = new TransactionExecutor(config.chainId);
-    this.powValidator = opts?.powValidator ?? verifyHeaderPoW;
     const genesis = buildGenesis(config);
     const hash = blockHash(genesis.block.header);
     this.bestHash = hash;
@@ -165,11 +158,11 @@ export class Blockchain {
    * Validates and imports a block (possibly out of order). Retries pending
    * children afterwards so gap-filling converges.
    *
-   * Production entry point: always verifies the header PoW via the injected
-   * powValidator (defaults to verifyHeaderPoW). Tests that need to exercise
-   * other validation rules without performing real PoW construct a Blockchain
-   * with a test-only powValidator bypass injected at construction time;
-   * production node/RPC/mining/P2P code never passes that option.
+   * Production entry point: always verifies the header PoW via checkPoW()
+   * (which calls verifyHeaderPoW). Tests that need to exercise other
+   * validation rules without performing real PoW must subclass Blockchain and
+   * override checkPoW(); they must not inject a validator through the
+   * production constructor.
    */
   acceptBlock(block: Block): ImportedReceipt & { accepted: boolean } {
     const preTip = this.tip.hash;
@@ -193,7 +186,20 @@ export class Blockchain {
     };
   }
 
-  private tryImport(block: Block): ImportedReceipt {
+  /**
+   * Proof-of-work check for block import. Production uses verifyHeaderPoW.
+   * Tests may subclass Blockchain and override this method to skip PoW.
+   * The production constructor does NOT accept a validator injection — the
+   * boundary between production and test PoW handling is enforced at the
+   * class level, not via a constructor option.
+   */
+  protected checkPoW(header: BlockHeader, nonce: bigint): ImportedReceipt | null {
+    const pow = verifyHeaderPoW(header, { nonce });
+    if (!pow.ok) return { ...this.tipInfo(), reorganized: false, reason: pow.reason ?? "PoW validation failed" };
+    return null;
+  }
+
+  protected tryImport(block: Block): ImportedReceipt {
     const reject = (reason: string): ImportedReceipt => ({ ...this.tipInfo(), reorganized: false, reason });
     const parentHash = block.header.parentHash;
     const parent = this.byHash.get(parentHash);
@@ -230,8 +236,8 @@ export class Blockchain {
     ) {
       return reject(`invalid difficulty: ${difficulty}`);
     }
-    const pow = this.powValidator(block.header, { nonce: block.header.nonce });
-    if (!pow.ok) return reject(pow.reason ?? "PoW validation failed");
+    const powRejection = this.checkPoW(block.header, block.header.nonce);
+    if (powRejection) return powRejection;
 
     // Difficulty retarget: anchors come from THIS branch (the parent chain the
     // block extends), never from the canonical tip. The new sample includes
