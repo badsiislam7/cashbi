@@ -44,6 +44,7 @@ function usage(exitCode: number): never {
       "      --checkpoint /tmp/opencode/genesis-search/checkpoint.json",
       "      [--result /tmp/candidate-result.json]    # default <checkpoint>.result.json",
       "      [--chunk-size 1024] [--sleep-ms 1]       # batching / event-loop yield",
+      "      [--checkpoint-every 50000]           # attempts per worker between checkpoints",
       "      --mine                                   # EXPLICIT opt-in; without it: plan preview only",
       "",
       "Without --mine, or with any required argument missing, this script",
@@ -74,6 +75,7 @@ function main(): void {
       result: { type: "string" },
       "chunk-size": { type: "string" },
       "sleep-ms": { type: "string" },
+      "checkpoint-every": { type: "string" },
       "dry-run": { type: "boolean", default: false },
     },
     strict: false,
@@ -101,10 +103,26 @@ function main(): void {
   }
 
   const values = cli.values;
+  const maxAttempts = values.maxAttempts!;
+  const workers = values.workers!;
+  // F-2: strict per-worker budgets that sum to exactly --max-attempts.
+  // Each worker needs at least 1 attempt budget, so maxAttempts must be >= workers.
+  if (maxAttempts < workers) {
+    fail(
+      `--max-attempts ${maxAttempts} must be >= --workers ${workers} (each worker needs at least 1 attempt budget)`,
+      2,
+    );
+  }
+  const baseBudget = Math.floor(maxAttempts / workers);
+  const remainder = maxAttempts % workers;
+  const budgetsPerWorker: number[] = [];
+  for (let w = 0; w < workers; w++) {
+    budgetsPerWorker.push(baseBudget + (w < remainder ? 1 : 0));
+  }
   const spec: PlanSpec = {
     startNonce: values.startNonce!,
-    workers: values.workers!,
-    laneChunkSize: Math.ceil(values.maxAttempts! / values.workers!),
+    workers,
+    laneChunkSize: Math.ceil(maxAttempts / workers),
   };
 
   if (cli.mode === "plan" || parsedFlags.values["dry-run"] === true) {
@@ -156,11 +174,12 @@ function main(): void {
     writeCheckpointAtomic(checkpointPath, checkpoint);
   }
 
-  const budgetPerWorker = Math.max(1, Math.ceil(values.maxAttempts! / values.workers!));
+  const checkpointEveryAttempts = values.checkpointEveryAttempts ?? 50_000;
   process.stdout.write(
     [
       "BOUNDED MINING RUN — this invocation hashes AT MOST",
-      `  ${rowCount(BigInt(budgetPerWorker) * BigInt(spec.workers))} nonces (${spec.workers} workers × ≤${budgetPerWorker} each), then STOPS.`,
+      `  ${rowCount(maxAttempts)} nonces (${workers} workers; per-worker budgets ` +
+      `sum to exactly ${maxAttempts}), then STOPS.`,
       "Earlier stop on a verified candidate or Ctrl+C (progress saved).",
       "Resume with identical arguments and a larger --max-attempts to continue.",
       "",
@@ -179,9 +198,10 @@ function main(): void {
     checkpoint,
     checkpointPath,
     resultPath,
-    budgetPerWorker,
+    budgetsPerWorker,
     chunkYield: values.chunkYield ?? 1024,
     sleepMs: values.sleepMs ?? 1,
+    checkpointEveryAttempts,
     shouldStop: () => interrupted,
     onProgress: (info) => {
       const rate = info.elapsedSeconds > 0 ? (info.attempts / info.elapsedSeconds) : 0;
