@@ -15,6 +15,7 @@
     "start": "tsx src/cli/index.ts start",
     "mine": "tsx src/cli/index.ts mine",
     "keygen": "tsx src/cli/index.ts keygen",
+    "mine-genesis": "tsx scripts/mine-genesis.ts",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
