@@ -905,7 +905,8 @@ export async function runMiningSession(options: SessionOptions): Promise<Session
     state.chunkIndex = chunkIndex;
     state.attemptedHere = attemptedHere;
     state.exhausted = exhausted;
-    globalAttempts = baselineTotal + workerStates.reduce((sum, s) => sum + s.attemptedHere, 0);
+    const sessionAttempts = workerStates.reduce((sum, s) => sum + s.attemptedHere, 0);
+    globalAttempts = baselineTotal + sessionAttempts;
 
     // Report probed nonces to the test hook (if any).
     if (reportNonces && options.onNonceProbe) {
@@ -919,14 +920,17 @@ export async function runMiningSession(options: SessionOptions): Promise<Session
       settleSession();
     }
 
-    // Periodic checkpoint on the attempt threshold.
+    // Periodic checkpoint on the attempt threshold (uses cumulative attempts
+    // so checkpoint frequency is stable across resume).
     if (globalAttempts - lastCheckpointAttempts >= checkpointEveryAttempts) {
       persist(false);
       lastCheckpointAttempts = globalAttempts;
     }
 
-    // Global budget reached — tell all workers to stop.
-    if (globalAttempts >= maxAttempts && !stopped && !found) {
+    // Per-invocation budget reached — tell all workers to stop.
+    // maxAttempts is the budget for THIS invocation only (not cumulative across
+    // checkpoint history). Compare against session attempts, not globalAttempts.
+    if (sessionAttempts >= maxAttempts && !stopped && !found) {
       stopped = true;
       for (const w of workerThreads) w.send({ type: "stop" });
     }
@@ -1227,7 +1231,6 @@ export interface ParsedCli {
     checkpoint?: string;
     result?: string;
     chunkYield?: number;
-    sleepMs?: number;
     /** Attempts per worker between checkpoints (default 50_000). */
     checkpointEveryAttempts?: number;
   };
@@ -1241,7 +1244,6 @@ export interface CliFlags {
   checkpoint?: string;
   result?: string;
   "chunk-size"?: string;
-  "sleep-ms"?: string;
   "checkpoint-every"?: string;
 }
 
@@ -1297,8 +1299,6 @@ export function parseCliArguments(flags: CliFlags): ParsedCli {
   if (typeof flags.result === "string" && flags.result.length > 0) values.result = flags.result;
   const chunkYield = parseIntFlag(flags["chunk-size"], problems, "chunk-size", 1, 2 ** 24, false);
   if (chunkYield !== null) values.chunkYield = chunkYield;
-  const sleepMs = parseIntFlag(flags["sleep-ms"], problems, "sleep-ms", 0, 3_600_000, false);
-  if (sleepMs !== null) values.sleepMs = sleepMs;
   const checkpointEveryAttempts = parseIntFlag(
     flags["checkpoint-every"],
     problems,

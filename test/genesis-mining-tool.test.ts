@@ -295,7 +295,7 @@ test("mine-tool: bounded session stops at the budget with exact per-worker count
     resultPath: join(scratchDir("sess1"), "result.json"),
     budgetsPerWorker: [25, 25],
     chunkYield: 7,
-    sleepMs: 0,
+
     onNonceProbe: (w, n) => probed.push([w, n]),
   });
   assert.equal(outcome.status, "budget-exhausted");
@@ -324,7 +324,7 @@ test("mine-tool: resume is exact — zero reprocessing across invocations", asyn
   // Invocation 1: budget 4 per worker → nonces w0: 0..3, w1: 10..13.
   await runMiningSession({
     plan, checkpoint: cp, checkpointPath: cpPath,
-    resultPath: join(dir, "result.json"), budgetsPerWorker: [4, 4], chunkYield: 3, sleepMs: 0,
+    resultPath: join(dir, "result.json"), budgetsPerWorker: [4, 4], chunkYield: 3, 
   });
   const saved1 = JSON.parse(readFileSync(cpPath, "utf8")) as Checkpoint;
   assert.deepEqual(saved1.workers.map((w) => w.nextNonce), ["0x4", "0xe"]);
@@ -337,7 +337,7 @@ test("mine-tool: resume is exact — zero reprocessing across invocations", asyn
   const probed: Array<[number, bigint]> = [];
   await runMiningSession({
     plan, checkpoint: loaded.checkpoint!, checkpointPath: cpPath,
-    resultPath: join(dir, "result.json"), budgetsPerWorker: [3, 3], chunkYield: 2, sleepMs: 0,
+    resultPath: join(dir, "result.json"), budgetsPerWorker: [3, 3], chunkYield: 2, 
     onNonceProbe: (w, n) => probed.push([w, n]),
   });
   // NO reprocessing: probed nonces start exactly where invocation 1 stopped.
@@ -354,7 +354,7 @@ test("mine-tool: lane exhaustion near MAX_UINT64 marks workers done, no nonsense
   const cp = buildFreshCheckpoint(plan, spec, utcNow());
   const outcome = await runMiningSession({
     plan, checkpoint: cp, checkpointPath: join(dir, "cp.json"),
-    resultPath: join(dir, "result.json"), budgetsPerWorker: [50, 50], chunkYield: 4, sleepMs: 0,
+    resultPath: join(dir, "result.json"), budgetsPerWorker: [50, 50], chunkYield: 4, 
   });
   assert.equal(outcome.status, "budget-exhausted");
   assert.equal(outcome.attempts, 11); // w0: 8 nonces, w1: 3 (clamped)
@@ -369,7 +369,7 @@ test("mine-tool: lane exhaustion near MAX_UINT64 marks workers done, no nonsense
   assert.deepEqual(validateCheckpoint(persisted, plan).problems, []);
   const outcome2 = await runMiningSession({
     plan, checkpoint: persisted, checkpointPath: join(dir, "cp.json"),
-    resultPath: join(dir, "result.json"), budgetsPerWorker: [50, 50], chunkYield: 4, sleepMs: 0,
+    resultPath: join(dir, "result.json"), budgetsPerWorker: [50, 50], chunkYield: 4, 
   });
   assert.equal(outcome2.attempts, 0);
   rmSync(dir, { recursive: true, force: true });
@@ -381,7 +381,7 @@ test("mine-tool: shouldStop halts between batches and the checkpoint stays valid
   const cp = buildFreshCheckpoint(plan, freshSpec(2, 1000), utcNow());
   const outcome = await runMiningSession({
     plan, checkpoint: cp, checkpointPath: join(dir, "cp.json"),
-    resultPath: join(dir, "result.json"), budgetsPerWorker: [100, 100], chunkYield: 5, sleepMs: 0,
+    resultPath: join(dir, "result.json"), budgetsPerWorker: [100, 100], chunkYield: 5, 
     shouldStop: () => true,
   });
   assert.equal(outcome.status, "stopped");
@@ -444,7 +444,7 @@ test("mine-tool: recorded candidate that fails production re-verification halts 
   };
   const threw = await runMiningSession({
     plan, checkpoint: cp, checkpointPath: join(scratchDir("sess5"), "cp.json"),
-    resultPath: join(scratchDir("sess5"), "result.json"), budgetsPerWorker: [10, 10], chunkYield: 2, sleepMs: 0,
+    resultPath: join(scratchDir("sess5"), "result.json"), budgetsPerWorker: [10, 10], chunkYield: 2, 
   }).then(
     () => null,
     (err: Error) => err,
@@ -534,7 +534,7 @@ test("mine-tool CLI: bounded --mine run then exact resume in a second process", 
   // Process 1: fresh bounded run, 40 attempts, 2 workers, chunk 5.
   const first = runCli([
     "--start", "0x0", "--max-attempts", "40", "--workers", "2",
-    "--checkpoint", cpPath, "--mine", "--chunk-size", "5", "--sleep-ms", "0",
+    "--checkpoint", cpPath, "--mine", "--chunk-size", "5", 
   ]);
   assert.equal(first.code, 0, `stdout: ${first.stdout}\nstderr: ${first.stderr}`);
   assert.ok(first.stdout.includes("status=budget-exhausted"));
@@ -548,7 +548,7 @@ test("mine-tool CLI: bounded --mine run then exact resume in a second process", 
   // carry over exactly: w0 continues in its chunk 1 [40,60), w1 in [60,80).
   const second = runCli([
     "--start", "0x0", "--max-attempts", "40", "--workers", "2",
-    "--checkpoint", cpPath, "--mine", "--chunk-size", "5", "--sleep-ms", "0",
+    "--checkpoint", cpPath, "--mine", "--chunk-size", "5", 
   ]);
   assert.equal(second.code, 0, `stdout: ${second.stdout}\nstderr: ${second.stderr}`);
   const afterSecond = JSON.parse(readFileSync(cpPath, "utf8")) as Checkpoint;
@@ -563,7 +563,7 @@ test("mine-tool CLI: bounded --mine run then exact resume in a second process", 
 /* Audit finding F-1: event-loop responsiveness                       */
 /* ------------------------------------------------------------------ */
 
-test("mine-tool: SIGINT/stop responsive with --sleep-ms 0 (F-1)", async () => {
+test("mine-tool: SIGINT/stop responsive with Ctrl+C (F-1)", async () => {
   const plan = getGenesisPlan();
   const dir = scratchDir("f1");
   const cp = buildFreshCheckpoint(plan, freshSpec(2, 1000), utcNow());
@@ -575,7 +575,7 @@ test("mine-tool: SIGINT/stop responsive with --sleep-ms 0 (F-1)", async () => {
     resultPath: join(dir, "result.json"),
     budgetsPerWorker: [100, 100],
     chunkYield: 10,
-    sleepMs: 0,
+
     onNonceProbe: () => {},
     shouldStop: () => {
       stopCalls += 1;
@@ -605,7 +605,7 @@ test("mine-tool: strict total attempt limit for divisible budget (F-2)", async (
     resultPath: join(dir, "result.json"),
     budgetsPerWorker: [5, 5],
     chunkYield: 2,
-    sleepMs: 0,
+
     onNonceProbe: (w, n) => probed.push([w, n]),
   });
   assert.equal(outcome.status, "budget-exhausted");
@@ -629,7 +629,7 @@ test("mine-tool: strict total attempt limit for non-divisible budget (F-2)", asy
     resultPath: join(dir, "result.json"),
     budgetsPerWorker: [4, 3],
     chunkYield: 2,
-    sleepMs: 0,
+
     onNonceProbe: (w, n) => probed.push([w, n]),
   });
   assert.equal(outcome.status, "budget-exhausted");
@@ -645,9 +645,115 @@ test("mine-tool: strict total attempt limit for non-divisible budget (F-2)", asy
   rmSync(dir, { recursive: true, force: true });
 });
 
-/* ------------------------------------------------------------------ */
-/* Audit finding F-3: configurable checkpoint frequency               */
-/* ------------------------------------------------------------------ */
+test("mine-tool library: --max-attempts is per-invocation across resume (F-2)", async () => {
+  const plan = getGenesisPlan();
+  const dir = scratchDir("edge-max-attempts");
+  const cpPath = join(dir, "cp.json");
+  const spec = freshSpec(2, 25);
+  const cp = buildFreshCheckpoint(plan, spec, utcNow());
+
+  // Invocation 1: maxAttempts=10, workers=2 → budgets [5,5], total 10
+  const outcome1 = await runMiningSession({
+    plan,
+    checkpoint: cp,
+    checkpointPath: cpPath,
+    resultPath: join(dir, "result.json"),
+    budgetsPerWorker: [5, 5],
+    chunkYield: 5,
+    onNonceProbe: () => {},
+  });
+  assert.equal(outcome1.status, "budget-exhausted");
+  assert.equal(outcome1.attempts, 10);
+  assert.equal(cp.totalAttempts, 10);
+
+  // Invocation 2: resume with SAME --max-attempts=10 → should do 10 MORE attempts
+  const cp1 = loadCheckpoint(cpPath, plan);
+  assert.ok(cp1.ok);
+  const outcome2 = await runMiningSession({
+    plan,
+    checkpoint: cp1.checkpoint!,
+    checkpointPath: cpPath,
+    resultPath: join(dir, "result.json"),
+    budgetsPerWorker: [5, 5],
+    chunkYield: 5,
+    onNonceProbe: () => {},
+  });
+  assert.equal(outcome2.status, "budget-exhausted");
+  assert.equal(outcome2.attempts, 10); // exactly 10 new attempts, not 0
+  assert.equal(cp1.checkpoint!.totalAttempts, 20); // cumulative: 10 + 10 = 20
+
+  // Invocation 3: resume with same budget again
+  const cp2 = loadCheckpoint(cpPath, plan);
+  assert.ok(cp2.ok);
+  const outcome3 = await runMiningSession({
+    plan,
+    checkpoint: cp2.checkpoint!,
+    checkpointPath: cpPath,
+    resultPath: join(dir, "result.json"),
+    budgetsPerWorker: [5, 5],
+    chunkYield: 5,
+    onNonceProbe: () => {},
+  });
+  assert.equal(outcome3.status, "budget-exhausted");
+  assert.equal(outcome3.attempts, 10); // exactly 10 new attempts
+  assert.equal(cp2.checkpoint!.totalAttempts, 30); // cumulative: 10 + 10 + 10 = 30
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("mine-tool library: --max-attempts cannot be exceeded by any invocation (F-2)", async () => {
+  const plan = getGenesisPlan();
+  const dir = scratchDir("edge-max-attempts-cap");
+  const cpPath = join(dir, "cp.json");
+  const spec = freshSpec(1, 100);
+  const cp = buildFreshCheckpoint(plan, spec, utcNow());
+
+  // First invocation: maxAttempts=5, workers=1 → exactly 5 attempts
+  const outcome1 = await runMiningSession({
+    plan,
+    checkpoint: cp,
+    checkpointPath: cpPath,
+    resultPath: join(dir, "result.json"),
+    budgetsPerWorker: [5],
+    chunkYield: 5,
+  });
+  assert.equal(outcome1.status, "budget-exhausted");
+  assert.equal(outcome1.attempts, 5);
+  assert.equal(cp.totalAttempts, 5);
+
+  // Second invocation: same budget → exactly 5 more attempts (not 0)
+  const cp1 = loadCheckpoint(cpPath, plan);
+  assert.ok(cp1.ok);
+  const outcome2 = await runMiningSession({
+    plan,
+    checkpoint: cp1.checkpoint!,
+    checkpointPath: cpPath,
+    resultPath: join(dir, "result.json"),
+    budgetsPerWorker: [5],
+    chunkYield: 5,
+  });
+  assert.equal(outcome2.status, "budget-exhausted");
+  assert.equal(outcome2.attempts, 5);
+  assert.equal(cp1.checkpoint!.totalAttempts, 10);
+
+  // Third invocation: smaller budget → exactly 3 attempts, no more
+  const cp2 = loadCheckpoint(cpPath, plan);
+  assert.ok(cp2.ok);
+  const outcome3 = await runMiningSession({
+    plan,
+    checkpoint: cp2.checkpoint!,
+    checkpointPath: cpPath,
+    resultPath: join(dir, "result.json"),
+    budgetsPerWorker: [3],
+    chunkYield: 3,
+  });
+  assert.equal(outcome3.status, "budget-exhausted");
+  assert.equal(outcome3.attempts, 3);
+  assert.equal(cp2.checkpoint!.totalAttempts, 13);
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
 
 test("mine-tool: CLI validation and propagation of --checkpoint-every (F-3)", () => {
   // Valid value
@@ -711,7 +817,7 @@ test("mine-tool: --checkpoint-every triggers checkpoints during a session (F-3)"
     resultPath: join(dir, "result.json"),
     budgetsPerWorker: [10, 10],
     chunkYield: 2,
-    sleepMs: 0,
+
     checkpointEveryAttempts: 3,
   });
   assert.equal(outcome.status, "budget-exhausted");
@@ -848,7 +954,7 @@ test("mine-tool: session reconciles valid orphan artifact and stops mining (F-5)
       resultPath: path,
       budgetsPerWorker: [10, 10],
       chunkYield: 2,
-      sleepMs: 0,
+  
     }),
     /failed production re-verification/
   );
@@ -933,7 +1039,7 @@ test("mine-tool: competing candidate path — invalid existing artifact fails sa
       resultPath: path,
       budgetsPerWorker: [10, 10],
       chunkYield: 2,
-      sleepMs: 0,
+  
     }),
     /failed production re-verification/
   );
@@ -953,7 +1059,7 @@ test("mine-tool CLI: strict total attempt limit with non-divisible budget (F-2)"
   // max-attempts=7, workers=2 → per-worker budgets [4, 3], total exactly 7
   const run = runCli([
     "--start", "0x0", "--max-attempts", "7", "--workers", "2",
-    "--checkpoint", cpPath, "--mine", "--chunk-size", "1", "--sleep-ms", "0",
+    "--checkpoint", cpPath, "--mine", "--chunk-size", "1", 
   ]);
   assert.equal(run.code, 0, `stdout: ${run.stdout}\nstderr: ${run.stderr}`);
   assert.ok(run.stdout.includes("status=budget-exhausted"));
@@ -968,7 +1074,7 @@ test("mine-tool CLI: --checkpoint-every accepted and propagated (F-3)", () => {
   const cpPath = join(dir, "cp.json");
   const run = runCli([
     "--start", "0x0", "--max-attempts", "20", "--workers", "2",
-    "--checkpoint", cpPath, "--mine", "--chunk-size", "1", "--sleep-ms", "0",
+    "--checkpoint", cpPath, "--mine", "--chunk-size", "1", 
     "--checkpoint-every", "3",
   ]);
   assert.equal(run.code, 0, `stdout: ${run.stdout}\nstderr: ${run.stderr}`);
@@ -997,7 +1103,7 @@ test("mine-tool library: budgetsPerWorker distributes correctly for divisible bu
     resultPath: join(dir, "result.json"),
     budgetsPerWorker: [2, 2, 2, 2],
     chunkYield: 1,
-    sleepMs: 0,
+
     onNonceProbe: (w, n) => probed.push([w, n]),
   });
   assert.equal(outcome.status, "budget-exhausted");
@@ -1023,7 +1129,7 @@ test("mine-tool library: budgetsPerWorker distributes correctly for non-divisibl
     resultPath: join(dir, "result.json"),
     budgetsPerWorker: [3, 2, 2],
     chunkYield: 1,
-    sleepMs: 0,
+
     onNonceProbe: (w, n) => probed.push([w, n]),
   });
   assert.equal(outcome.status, "budget-exhausted");
@@ -1046,7 +1152,7 @@ test("mine-tool library: budgetsPerWorker rejects zero budget", async () => {
       resultPath: join(scratchDir("edge3"), "result.json"),
       budgetsPerWorker: [1, 0],
       chunkYield: 1,
-      sleepMs: 0,
+  
     }),
     /budgetsPerWorker entries must be integers >= 1/
   );
@@ -1063,7 +1169,7 @@ test("mine-tool library: budgetsPerWorker rejects wrong length", async () => {
       resultPath: join(scratchDir("edge4"), "result.json"),
       budgetsPerWorker: [1],
       chunkYield: 1,
-      sleepMs: 0,
+  
     }),
     /budgetsPerWorker must be an array of length 2/
   );
@@ -1080,7 +1186,7 @@ test("mine-tool library: --max-attempts 1 --workers 1 runs exactly 1 attempt", a
     resultPath: join(dir, "result.json"),
     budgetsPerWorker: [1],
     chunkYield: 1,
-    sleepMs: 0,
+
   });
   assert.equal(outcome.status, "budget-exhausted");
   assert.equal(outcome.attempts, 1);
@@ -1096,7 +1202,7 @@ test("mine-tool CLI: --max-attempts 1 --workers 1 runs exactly 1 attempt", () =>
   const cpPath = join(dir, "cp.json");
   const run = runCli([
     "--start", "0x0", "--max-attempts", "1", "--workers", "1",
-    "--checkpoint", cpPath, "--mine", "--chunk-size", "1", "--sleep-ms", "0",
+    "--checkpoint", cpPath, "--mine", "--chunk-size", "1", 
   ]);
   assert.equal(run.code, 0, `stdout: ${run.stdout}\nstderr: ${run.stderr}`);
   assert.ok(run.stdout.includes("status=budget-exhausted"));
@@ -1111,7 +1217,7 @@ test("mine-tool CLI: --max-attempts 2 --workers 4 rejected with usage error", ()
   const cpPath = join(dir, "cp.json");
   const run = runCli([
     "--start", "0x0", "--max-attempts", "2", "--workers", "4",
-    "--checkpoint", cpPath, "--mine", "--chunk-size", "1", "--sleep-ms", "0",
+    "--checkpoint", cpPath, "--mine", "--chunk-size", "1", 
   ]);
   assert.equal(run.code, 2, `expected exit 2, got ${run.code}\nstdout: ${run.stdout}\nstderr: ${run.stderr}`);
   assert.ok(run.stderr.includes("must be >= --workers"));
@@ -1123,7 +1229,7 @@ test("mine-tool CLI: --max-attempts 4 --workers 4 runs exactly 1 attempt per wor
   const cpPath = join(dir, "cp.json");
   const run = runCli([
     "--start", "0x0", "--max-attempts", "4", "--workers", "4",
-    "--checkpoint", cpPath, "--mine", "--chunk-size", "1", "--sleep-ms", "0",
+    "--checkpoint", cpPath, "--mine", "--chunk-size", "1", 
   ]);
   assert.equal(run.code, 0, `stdout: ${run.stdout}\nstderr: ${run.stderr}`);
   assert.ok(run.stdout.includes("status=budget-exhausted"));
@@ -1138,13 +1244,42 @@ test("mine-tool CLI: --max-attempts 7 --workers 2 runs exactly 7 attempts [4,3]"
   const cpPath = join(dir, "cp.json");
   const run = runCli([
     "--start", "0x0", "--max-attempts", "7", "--workers", "2",
-    "--checkpoint", cpPath, "--mine", "--chunk-size", "1", "--sleep-ms", "0",
+    "--checkpoint", cpPath, "--mine", "--chunk-size", "1", 
   ]);
   assert.equal(run.code, 0, `stdout: ${run.stdout}\nstderr: ${run.stderr}`);
   assert.ok(run.stdout.includes("status=budget-exhausted"));
   const cp = JSON.parse(readFileSync(cpPath, "utf8")) as Checkpoint;
   assert.equal(cp.totalAttempts, 7);
   assert.deepEqual(cp.workers.map((w) => w.attempts), [4, 3]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("mine-tool CLI: --max-attempts is per-invocation across resume (F-2)", () => {
+  const dir = scratchDir("edge-cli-max-attempts");
+  const cpPath = join(dir, "cp.json");
+
+  // Process 1: --max-attempts 10, workers=2 → 10 attempts
+  const first = runCli([
+    "--start", "0x0", "--max-attempts", "10", "--workers", "2",
+    "--checkpoint", cpPath, "--mine", "--chunk-size", "5",
+  ]);
+  assert.equal(first.code, 0, `stdout: ${first.stdout}\nstderr: ${first.stderr}`);
+  assert.ok(first.stdout.includes("status=budget-exhausted"));
+  const afterFirst = JSON.parse(readFileSync(cpPath, "utf8")) as Checkpoint;
+  assert.equal(afterFirst.totalAttempts, 10);
+  assert.deepEqual(afterFirst.workers.map((w) => w.attempts), [5, 5]);
+
+  // Process 2: resume with SAME --max-attempts=10 → should do 10 MORE attempts (total 20)
+  const second = runCli([
+    "--start", "0x0", "--max-attempts", "10", "--workers", "2",
+    "--checkpoint", cpPath, "--mine", "--chunk-size", "5",
+  ]);
+  assert.equal(second.code, 0, `stdout: ${second.stdout}\nstderr: ${second.stderr}`);
+  assert.ok(second.stdout.includes("status=budget-exhausted"));
+  const afterSecond = JSON.parse(readFileSync(cpPath, "utf8")) as Checkpoint;
+  assert.equal(afterSecond.totalAttempts, 20);
+  assert.deepEqual(afterSecond.workers.map((w) => w.attempts), [10, 10]);
+
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -1230,7 +1365,7 @@ test("mine-tool: orphan recovery limitation — valid-candidate success path can
 /* Section 3: Stop responsiveness and checkpoint durability           */
 /* ------------------------------------------------------------------ */
 
-test("mine-tool: checkpoint written on stop with --sleep-ms 0", async () => {
+test("mine-tool: checkpoint written on stop", async () => {
   const plan = getGenesisPlan();
   const dir = scratchDir("edge-stop");
   const cp = buildFreshCheckpoint(plan, freshSpec(2, 1000), utcNow());
@@ -1242,7 +1377,7 @@ test("mine-tool: checkpoint written on stop with --sleep-ms 0", async () => {
     resultPath: join(dir, "result.json"),
     budgetsPerWorker: [100, 100],
     chunkYield: 10,
-    sleepMs: 0,
+
     shouldStop: () => {
       stopCalls += 1;
       return stopCalls > 1;
@@ -1269,7 +1404,7 @@ test("mine-tool: --checkpoint-every validated and controls periodic persistence"
     resultPath: join(dir, "result.json"),
     budgetsPerWorker: [5, 5],
     chunkYield: 1,
-    sleepMs: 0,
+
     checkpointEveryAttempts: 1,
   });
   assert.equal(outcome.status, "budget-exhausted");

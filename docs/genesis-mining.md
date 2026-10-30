@@ -63,7 +63,7 @@ npm run mine-genesis -- \
   --max-attempts 40 \
   --workers 2 \
   --checkpoint /tmp/genesis-smoke/cp.json \
-  --mine --chunk-size 5 --sleep-ms 0
+  --mine --chunk-size 5 --checkpoint-every 10
 ```
 
 This hashes **at most** 40 nonces (2 workers × ≤20), prints measured rate and
@@ -83,7 +83,7 @@ npm run mine-genesis -- --start 0x0 --max-attempts 1000 --workers 2 \
 Required for a mining run: `--start <0x-hex|decimal>`, `--max-attempts <n>`,
 `--workers <n>`, `--checkpoint <path>`, **and** `--mine`. Optional:
 `--result <path>` (default `<checkpoint>.result.json`), `--chunk-size`,
-`--sleep-ms`. Missing anything → usage output, exit code 2, no search.
+`--checkpoint-every`. Missing anything → usage output, exit code 2, no search.
 
 Exit codes: `0` success · `2` usage/argument error · `3` invalid checkpoint or
 plan mismatch (aborts without touching the file) · `1` runtime error · `130`
@@ -101,6 +101,19 @@ The checkpoint (`cashbi-genesis-mining-checkpoint`, version 1) stores:
   chunk index, per-worker attempts, and an `exhausted` flag for workers whose
   lane reached the maximum-uint64 clamped chunk;
 - total attempts, checkpoint count, and a `candidate` record when found.
+
+## Attempt budget semantics
+
+`--max-attempts <n>` sets a **per-invocation** attempt budget, not a cumulative
+limit across checkpoint history. Each invocation gets its own fresh budget of
+`n` attempts, distributed across workers (the first `n % workers` workers get
+`floor(n/workers) + 1`, the rest get `floor(n/workers)`). A resume invocation
+with the same `--max-attempts` will perform up to `n` additional attempts,
+regardless of how many attempts were recorded in previous invocations.
+
+The checkpoint's `totalAttempts` field records the cumulative sum across all
+invocations and is used only for record-keeping and re-verification — it is
+never compared against `--max-attempts`.
 
 Validation on every load rejects: wrong schema/version, preimage drift
 (stale checkpoint from a different genesis configuration), consensus-constant
@@ -136,9 +149,9 @@ other worker's lane is touched.
   `2^256 / (POW_LIMIT + 1) = 4,295,032,833` (~2³²).
 - The measured `powHash` throughput of the single-threaded in-process search is
   ~24,400 hashes/s ⇒ a mean search time of ≈ **48.9 hours single-threaded**
-  (roughly halved with 2 workers on separate cores, tuned `--chunk-size`,
-  `--sleep-ms 0`). **This is an ESTIMATE**, not a guarantee: throughput depends
-  on the machine, and the geometric distribution has high variance.
+  (roughly halved with 2 workers on separate cores, tuned `--chunk-size`).
+  **This is an ESTIMATE**, not a guarantee: throughput depends on the machine,
+  and the geometric distribution has high variance.
 
 A real search should only be started with an explicit decision, using bounded
 invocations chained through the checkpoint (e.g. `--max-attempts 5000000`
