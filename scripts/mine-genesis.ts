@@ -186,12 +186,7 @@ function main(): void {
     ].join("\n"),
   );
 
-  let interrupted = false;
-  process.on("SIGINT", () => {
-    if (interrupted) process.exit(130);
-    interrupted = true;
-    process.stdout.write("\nSIGINT received — finishing current batch, saving checkpoint, exiting…\n");
-  });
+  const interrupted = false;
 
   void runMiningSession({
     plan,
@@ -200,7 +195,6 @@ function main(): void {
     resultPath,
     budgetsPerWorker,
     chunkYield: values.chunkYield ?? 1024,
-    sleepMs: values.sleepMs ?? 1,
     checkpointEveryAttempts,
     shouldStop: () => interrupted,
     onProgress: (info) => {

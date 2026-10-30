@@ -33,8 +33,9 @@
  *   the checkpoint's plan block, so a later resume validates lane membership
  *   deterministically.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { fork, type ChildProcess } from "node:child_process";
 import {
   buildGenesis,
   emptyGenesisConfig,
@@ -45,12 +46,7 @@ import {
   hashHeaderWithoutNonce,
   type BlockHeader,
 } from "../chain/block.js";
-import {
-  isMiningCandidate,
-  powHash,
-  verifyHeaderPoW,
-  difficultyToTarget,
-} from "../consensus/pow.js";
+import { powHash, verifyHeaderPoW, difficultyToTarget } from "../consensus/pow.js";
 import {
   DEV_CHAIN_ID,
   DEV_PARAM_VERSION,
@@ -59,11 +55,20 @@ import {
   POW_LIMIT,
 } from "../config/params.js";
 import { toHex } from "../util/bytes.js";
-import { sleep } from "../util/async.js";
 
 export const MAX_UINT64 = (1n << 64n) - 1n;
 export const MAX_WORKERS = 64;
 export const MAX_ATTEMPTS_PER_INVOCATION = 2 ** 31; // ~2.1e9 attempts per invocation cap
+
+/** Monotonic counter for unique temporary file names (audit finding F-4). */
+let tmpFileCounter = 0;
+
+/** Unique temporary file path in the same directory as `path`. Combines pid,
+    nanosecond time and a monotonic counter so concurrent/rapid writes never
+    collide (audit finding F-4). */
+function tmpPathFor(path: string): string {
+  return `${path}.tmp-${process.pid}-${process.hrtime.bigint()}-${tmpFileCounter++}`;
+}
 
 export const CHECKPOINT_SCHEMA = "cashbi-genesis-mining-checkpoint";
 export const CHECKPOINT_VERSION = 1;
@@ -470,13 +475,25 @@ export function checkpointToJson(cp: Checkpoint): string {
   return JSON.stringify(cp, null, 2) + "\n";
 }
 
-/** Atomic write: temporary file + rename in the same directory. */
+/** Atomic write: temporary file + rename in the same directory (audit finding F-4).
+    Uses a unique temporary name (pid + hrtime + monotonic counter) so rapid or
+    concurrent writes never collide. Cleans up the temp file if write or rename
+    fails so no partial file is left behind. */
 export function writeCheckpointAtomic(path: string, cp: Checkpoint): void {
   const dir = dirname(path);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, checkpointToJson(cp), "utf8");
-  renameSync(tmp, path);
+  const tmp = tmpPathFor(path);
+  try {
+    writeFileSync(tmp, checkpointToJson(cp), "utf8");
+    renameSync(tmp, path);
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* ignore cleanup failure */
+    }
+    throw err;
+  }
 }
 
 export interface LoadedCheckpoint {
@@ -586,11 +603,16 @@ export function verifyGenesisCandidate(
 }
 
 /** Writes the result artifact atomically; refuses to overwrite a different
-    existing result. An identical existing artifact counts as already saved. */
+    existing result. An identical existing artifact counts as already saved.
+    On refusal due to different content, returns the existing parsed record so
+    callers can reconcile (audit finding F-6). Uses unique temporary names and
+    cleans up on write/rename failure (audit finding F-4). */
 export function writeResultArtifact(
   path: string,
   record: CandidateRecord,
-): { ok: true; alreadyRecorded?: boolean } | { ok: false; reason: string } {
+):
+  | { ok: true; alreadyRecorded?: boolean }
+  | { ok: false; reason: string; existing?: CandidateRecord } {
   const serialized = JSON.stringify(record, null, 2) + "\n";
   if (existsSync(path)) {
     let existing: string;
@@ -600,16 +622,32 @@ export function writeResultArtifact(
       return { ok: false, reason: `existing result artifact unreadable: ${(err as Error).message}` };
     }
     if (existing === serialized) return { ok: true, alreadyRecorded: true };
+    let existingRecord: CandidateRecord | undefined;
+    try {
+      existingRecord = JSON.parse(existing) as CandidateRecord;
+    } catch {
+      /* not parseable — existingRecord stays undefined */
+    }
     return {
       ok: false,
       reason: `result artifact already exists at ${path} with different content — refusing to overwrite`,
+      existing: existingRecord,
     };
   }
   const dir = dirname(path);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, serialized, "utf8");
-  renameSync(tmp, path);
+  const tmp = tmpPathFor(path);
+  try {
+    writeFileSync(tmp, serialized, "utf8");
+    renameSync(tmp, path);
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* ignore cleanup failure */
+    }
+    throw err;
+  }
   return { ok: true };
 }
 /* ------------------------------------------------------------------ */
@@ -622,12 +660,11 @@ export interface SessionOptions {
   resultPath: string;
   /** Validated, resumed checkpoint snapshot (SRC of truth for the session). */
   checkpoint: Checkpoint;
-  /** Per-worker attempt budget for THIS invocation (must be >= 1). */
-  budgetPerWorker: number;
+  /** Per-worker attempt budgets for THIS invocation (index = worker id).
+      The sum of all budgets is the strict total attempt cap (audit finding F-2). */
+  budgetsPerWorker: number[];
   /** Hash batch before yielding to the event loop (default 1024). */
   chunkYield?: number;
-  /** Cooperative sleep after each batch in ms (default 1). */
-  sleepMs?: number;
   /** Test-only observation hook: no effect on the search result. */
   onNonceProbe?: (worker: number, nonce: bigint) => void;
   onProgress?: (info: ProgressInfo) => void;
@@ -655,20 +692,21 @@ export interface SessionOutcome {
   rate: number;
 }
 
-interface WorkerLive {
-  saved: WorkerSave;         // frozen original from the checkpoint (baseline)
-  nextNonce: bigint;         // live position in worker's own lane
-  chunkIndex: number;        // live OWN chunk index (worker's k-th lane chunk)
-  attemptedHere: number;     // attempts made during THIS session
-  exhausted: boolean;        // lane fully consumed (final chunk past MAX_UINT64)
-}
-
 function utcNow(): string {
   return new Date().toISOString().replace("T", " ").replace("Z", "");
 }
 
 /**
- * Runs one bounded mining session under an existing, VALIDATED checkpoint.
+ * Runs one bounded mining session under an existing, VALIDATED checkpoint
+ * using true multi-core parallelism via Node.js worker threads.
+ *
+ * Each logical worker runs in its own Worker thread and hashes a provably
+ * disjoint lane of genesis nonces. The main thread is the sole coordinator:
+ * it owns the checkpoint file, writes checkpoints atomically, verifies
+ * candidates through the production `verifyHeaderPoW` + `blockHash`, and
+ * enforces the strict global `--max-attempts` limit. Workers never write
+ * files and never touch each other's lanes.
+ *
  * - Every worker continues at its exact saved nonce: no completed attempt is
  *   reprocessed, no other worker's lane is touched.
  * - Progress is merged into the checkpoint (baseline attempts + this
@@ -681,9 +719,23 @@ function utcNow(): string {
  */
 export async function runMiningSession(options: SessionOptions): Promise<SessionOutcome> {
   const chunkYield = options.chunkYield ?? 1024;
-  const sleepMs = options.sleepMs ?? 1;
   const checkpointEveryAttempts = options.checkpointEveryAttempts ?? 50_000;
   const cp = options.checkpoint as Checkpoint;
+  const reportNonces = typeof options.onNonceProbe === "function";
+
+  // Strict per-worker budgets (F-2): the sum equals the configured total cap,
+  // so workers can never collectively exceed --max-attempts.
+  const budgetsPerWorker = options.budgetsPerWorker;
+  if (!Array.isArray(budgetsPerWorker) || budgetsPerWorker.length !== cp.workers.length) {
+    throw new Error(
+      `budgetsPerWorker must be an array of length ${cp.workers.length} (one per worker), got ${JSON.stringify(budgetsPerWorker)}`,
+    );
+  }
+  for (const b of budgetsPerWorker) {
+    if (typeof b !== "number" || !Number.isInteger(b) || b < 1) {
+      throw new Error(`budgetsPerWorker entries must be integers >= 1, got ${JSON.stringify(budgetsPerWorker)}`);
+    }
+  }
 
   // A candidate already recorded in the checkpoint is re-verified through the
   // production validator (never trusted blindly) before anything else.
@@ -697,28 +749,36 @@ export async function runMiningSession(options: SessionOptions): Promise<Session
 
   const lanePlan: PlanSpec = {
     startNonce: parseNonceStringOrThrow(cp.plan.startNonce),
-    workers: cp.plan.workers,
+    workers: cp.workers.length,
     laneChunkSize: cp.plan.laneChunkSize,
   };
   const baselineTotal = cp.workers.reduce((acc, w) => acc + w.attempts, 0);
-  const live: WorkerLive[] = cp.workers.map((saved) => ({
-    saved: { ...saved },
+  const maxAttempts = budgetsPerWorker.reduce((sum, b) => sum + b, 0);
+
+  // Per-worker state tracked by the main thread (single source of truth).
+  // Workers report progress; the main thread merges it into the checkpoint.
+  const workerStates = cp.workers.map((saved) => ({
+    workerId: saved.worker,
     nextNonce: parseNonceStringOrThrow(saved.nextNonce),
     chunkIndex: saved.chunkIndex,
-    attemptedHere: 0,
+    attemptedHere: 0, // attempts made by this worker in THIS session
+    baselineAttempts: saved.attempts,
     exhausted: saved.exhausted === true,
+    done: false,
   }));
 
   const started = Date.now();
   let found: CandidateRecord | null = null;
   let stopped = false;
+  let globalAttempts = 0;
+  let lastCheckpointAttempts = 0;
 
   const persist = (finalCp: boolean): void => {
-    cp.workers = live.map((w) => ({
-      ...w.saved,
+    cp.workers = workerStates.map((w) => ({
+      worker: w.workerId,
       nextNonce: "0x" + w.nextNonce.toString(16),
       chunkIndex: w.chunkIndex,
-      attempts: w.saved.attempts + w.attemptedHere,
+      attempts: w.baselineAttempts + w.attemptedHere,
       exhausted: w.exhausted,
     }));
     cp.totalAttempts = cp.workers.reduce((sum, w) => sum + w.attempts, 0);
@@ -728,113 +788,371 @@ export async function runMiningSession(options: SessionOptions): Promise<Session
     writeCheckpointAtomic(options.checkpointPath, cp);
   };
 
-  /** Candidate handling: re-derive everything, write the result artifact
-   *  first (the authoritative record), then the checkpoint. */
-  const handleCandidate = (nonce: bigint): void => {
-    const totalAttempts = baselineTotal + live.reduce((acc, w) => acc + w.attemptedHere, 0) + 1;
+  // F-5: If a result artifact exists but the checkpoint does not record a
+  // candidate (crash between artifact write and checkpoint persist), reconcile
+  // it through production validation before searching. A valid artifact is
+  // adopted into the checkpoint; an invalid/stale/malformed one fails safely.
+  if (cp.candidate === null) {
+    const orphan = reconcileOrphanResultArtifact(options.plan, options.resultPath);
+    if (orphan.status === "already-found") {
+      cp.candidate = orphan.record;
+      persist(true);
+      return { status: "already-found", attempts: 0, candidate: cp.candidate, elapsedSeconds: 0, rate: 0 };
+    }
+  }
+
+  // Session control: promise resolves exactly once when all workers finish,
+  // a candidate is found/verified, or an error occurs.
+  let sessionSettled = false;
+  let sessionResolve: ((outcome: SessionOutcome) => void) | null = null;
+  let sessionReject: ((err: Error) => void) | null = null;
+  const sessionPromise = new Promise<SessionOutcome>((resolve, reject) => {
+    sessionResolve = resolve;
+    sessionReject = reject;
+  });
+
+  let workersDone = 0;
+  const totalWorkers = cp.workers.length;
+  const workerThreads: ChildProcess[] = [];
+
+  const finishSession = (): SessionOutcome => {
+    // Terminate all worker processes — session is complete.
+    for (const w of workerThreads) {
+      try {
+        w.kill("SIGTERM");
+      } catch {
+        /* ignore termination errors */
+      }
+    }
+    if (found === null) {
+      persist(false);
+    }
+    const elapsedSeconds = Number(Date.now() - started) / 1000;
+    const totalNow = cp.totalAttempts;
+    // Determine status: budget exhaustion takes precedence over "stopped"
+    // because both can be true when the global budget was reached.
+    let st: SessionStatus;
+    if (found !== null) {
+      st = "candidate-found";
+    } else if (globalAttempts >= maxAttempts) {
+      st = "budget-exhausted";
+    } else if (stopped) {
+      st = "stopped";
+    } else {
+      st = "budget-exhausted";
+    }
+    return {
+      status: st,
+      attempts: totalNow - baselineTotal,
+      candidate: found,
+      elapsedSeconds,
+      rate: elapsedSeconds > 0 ? (totalNow - baselineTotal) / elapsedSeconds : 0,
+    };
+  };
+
+  const settleSession = (): void => {
+    if (sessionSettled) return;
+    sessionSettled = true;
+    if (stopPollHandle) {
+      clearImmediate(stopPollHandle);
+      stopPollHandle = null;
+    }
+    const outcome = finishSession();
+    if (sessionResolve) {
+      sessionResolve(outcome);
+      sessionResolve = null;
+    }
+    sessionReject = null;
+  };
+
+  const settleSessionError = (err: Error): void => {
+    if (sessionSettled) return;
+    sessionSettled = true;
+    if (stopPollHandle) {
+      clearImmediate(stopPollHandle);
+      stopPollHandle = null;
+    }
+    // Terminate workers on error.
+    for (const w of workerThreads) {
+      try {
+        w.kill("SIGTERM");
+      } catch {
+        /* ignore */
+      }
+    }
+    if (sessionReject) {
+      sessionReject(err);
+      sessionReject = null;
+    }
+    sessionResolve = null;
+  };
+
+  const handleProgress = (
+    workerId: number,
+    nextNonce: string,
+    attemptedHere: number,
+    chunkIndex: number,
+    exhausted: boolean,
+    probedNonces: bigint[],
+  ): void => {
+    // Ignore messages after session is settled.
+    if (sessionSettled) return;
+
+    workersStarted = true;
+
+    const state = workerStates[workerId];
+    state.nextNonce = parseNonceStringOrThrow(nextNonce);
+    state.chunkIndex = chunkIndex;
+    state.attemptedHere = attemptedHere;
+    state.exhausted = exhausted;
+    globalAttempts = baselineTotal + workerStates.reduce((sum, s) => sum + s.attemptedHere, 0);
+
+    // Report probed nonces to the test hook (if any).
+    if (reportNonces && options.onNonceProbe) {
+      for (const n of probedNonces) options.onNonceProbe!(workerId, n);
+    }
+
+    // Check shouldStop — if the caller requests a stop, halt all workers.
+    if (options.shouldStop?.() ?? false) {
+      stopped = true;
+      for (const w of workerThreads) w.send({ type: "stop" });
+      settleSession();
+    }
+
+    // Periodic checkpoint on the attempt threshold.
+    if (globalAttempts - lastCheckpointAttempts >= checkpointEveryAttempts) {
+      persist(false);
+      lastCheckpointAttempts = globalAttempts;
+    }
+
+    // Global budget reached — tell all workers to stop.
+    if (globalAttempts >= maxAttempts && !stopped && !found) {
+      stopped = true;
+      for (const w of workerThreads) w.send({ type: "stop" });
+    }
+
+    options.onProgress?.({
+      attempts: globalAttempts,
+      workersBusy: exhausted ? 0 : 1,
+      rate: 0,
+      elapsedSeconds: Number(Date.now() - started) / 1000,
+      checkpointCount: cp.checkpointCount,
+    });
+  };
+
+  const handleCandidate = async (workerId: number, nonceHex: string): Promise<void> => {
+    stopped = true;
+    // Tell all workers to stop immediately.
+    for (const w of workerThreads) w.send({ type: "stop" });
+
+    const nonce = BigInt(nonceHex);
+    const totalAttempts = baselineTotal + workerStates.reduce((sum, s) => sum + s.attemptedHere, 0) + 1;
     const verdict = verifyGenesisCandidate(options.plan, nonce, totalAttempts, utcNow());
     if (!verdict.ok || !verdict.record) {
       throw new Error(`in-tool verification rejected a target-passing nonce ${nonce.toString(16)}: ${verdict.reason}`);
     }
     found = verdict.record;
     const write = writeResultArtifact(options.resultPath, found);
-    if (!write.ok) throw new Error(write.reason);
+    if (!write.ok) {
+      // F-6: artifact exists with different content (another worker found a
+      // competing candidate in the same batch). Verify the existing artifact
+      // through production validation before deciding.
+      const existing = write.existing;
+      if (existing) {
+        const existingNonce = BigInt(existing.nonce);
+        const existingVerdict = verifyGenesisCandidate(
+          options.plan,
+          existingNonce,
+          existing.totalAttempts,
+          existing.foundAtUtc,
+        );
+        if (existingVerdict.ok && existingVerdict.record) {
+          found = existingVerdict.record; // preserve the valid existing candidate
+        } else {
+          throw new Error(
+            `competing candidate rejected: ${write.reason} (existing artifact failed production verification)`,
+          );
+        }
+      } else {
+        throw new Error(write.reason);
+      }
+    }
     persist(true);
+    settleSession();
   };
 
-  const runOne = async (w: WorkerLive): Promise<void> => {
-    let attemptedSinceCheckpoint = 0;
-    const advanceOrFinish = (): boolean => {
-      /** When `w.nextNonce` has left the current own chunk, jump to the start
-       *  of the NEXT own-lane chunk; set `exhausted` when none exists. */
-      const nextWindow = allocateWindow(lanePlan, w.saved.worker, w.chunkIndex + 1);
-      if (nextWindow.size === 0n) {
-        w.exhausted = true;
-        // Keep nextNonce a valid uint64: pin it to the final nonce of the
-        // chunk just completed (the worker's last nonce in this lane).
-        const done = allocateWindow(lanePlan, w.saved.worker, w.chunkIndex);
-        w.nextNonce = done.toNonce;
-        return false; // lane fully consumed: no further work
-      }
-      w.nextNonce = nextWindow.fromNonce;
-      w.chunkIndex = w.chunkIndex + 1;
-      return true;
-    };
-    while (w.attemptedHere < options.budgetPerWorker && found === null && !stopped) {
-      if (w.exhausted) break; // nothing left in this worker's lane
-      // Validate lane membership from live state.
-      const membership = laneMembership(lanePlan, w.nextNonce);
-      if (!membership.ok || membership.lane !== w.saved.worker || membership.ownChunkIndex < w.chunkIndex) {
-        throw new Error(
-          `worker ${w.saved.worker}: live position ${w.nextNonce.toString(16)} left its lane (checkpoint inconsistency)`,
-        );
-      }
-      w.chunkIndex = membership.ownChunkIndex;
-      const window = allocateWindow(lanePlan, w.saved.worker, w.chunkIndex);
-      if (window.size === 0n) {
-        if (!advanceOrFinish()) break;
-        continue;
-      }
-      if (w.nextNonce > window.toNonce) {
-        // Current own chunk complete; jump within the worker's own lane.
-        if (!advanceOrFinish()) break;
-        continue;
-      }
-
-      const batchBudget = Math.min(chunkYield, options.budgetPerWorker - w.attemptedHere);
-      const batchEnd = w.nextNonce + BigInt(batchBudget) - 1n > window.toNonce
-        ? window.toNonce
-        : w.nextNonce + BigInt(batchBudget) - 1n;
-      let nonce = w.nextNonce;
-      while (nonce <= batchEnd) {
-        options.onNonceProbe?.(w.saved.worker, nonce);
-        if (isMiningCandidate(options.plan.header, nonce)) {
-          handleCandidate(nonce);
-          return;
-        }
-        nonce += 1n;
-        w.nextNonce = nonce;
-        w.attemptedHere += 1;
-        attemptedSinceCheckpoint += 1;
-      }
-      if (w.nextNonce > window.toNonce && !advanceOrFinish()) {
-        // The chunk that just finished was the worker's last one.
-        attemptedSinceCheckpoint = Number.MAX_SAFE_INTEGER; // force final persist
-      }
-      // Checkpoint on the attempt-threshold or when the worker becomes idle.
-      const budgetLeft = options.budgetPerWorker - w.attemptedHere;
-      const laneDone = window.toNonce < w.nextNonce;
-      if (attemptedSinceCheckpoint >= checkpointEveryAttempts || budgetLeft === 0 || laneDone) {
-        persist(false);
-        attemptedSinceCheckpoint = 0;
-        options.onProgress?.({
-          attempts: baselineTotal + live.reduce((acc, x) => acc + x.attemptedHere, 0),
-          workersBusy: window.size === 0n ? 0 : 1,
-          rate: 0,
-          elapsedSeconds: Number(Date.now() - started) / 1000,
-          checkpointCount: cp.checkpointCount,
-        });
-      }
-      if (sleepMs > 0) await sleep(sleepMs);
-      if (options.shouldStop?.() ?? false) stopped = true;
+  const handleDone = (workerId: number, attemptedHere: number, nextNonce: string, chunkIndex: number, exhausted: boolean): void => {
+    if (sessionSettled) return;
+    workerStates[workerId].done = true;
+    workerStates[workerId].attemptedHere = attemptedHere;
+    workerStates[workerId].nextNonce = parseNonceStringOrThrow(nextNonce);
+    workerStates[workerId].chunkIndex = chunkIndex;
+    workerStates[workerId].exhausted = exhausted;
+    workersDone++;
+    if (workersDone >= totalWorkers) {
+      settleSession();
     }
   };
 
-  await Promise.all(live.map((w) => runOne(w)));
-
-  const status: SessionStatus = found !== null
-    ? "candidate-found"
-    : stopped ? "stopped" : "budget-exhausted";
-  if (status !== "candidate-found") persist(false); // candidate path already persisted with the record
-  const elapsedSeconds = Number(Date.now() - started) / 1000;
-  const totalNow = cp.totalAttempts;
-  return {
-    status,
-    attempts: totalNow - baselineTotal,
-    candidate: found,
-    elapsedSeconds,
-    rate: elapsedSeconds > 0 ? (totalNow - baselineTotal) / elapsedSeconds : 0,
+  const handleError = (workerId: number, message: string): void => {
+    if (sessionSettled) return;
+    workerStates[workerId].done = true;
+    workersDone++;
+    settleSessionError(new Error(`worker ${workerId} failed: ${message}`));
   };
+
+  // Serialize bigint values as "0x"-prefixed hex strings for JSON transport
+  // to the worker process via the MINING_WORKER_DATA environment variable.
+  function serializeWorkerData(wd: {
+    workerId: number;
+    totalWorkers: number;
+    laneChunkSize: number;
+    startNonce: bigint;
+    header: BlockHeader;
+    budget: number;
+    chunkYield: number;
+    reportNonces: boolean;
+    exhausted: boolean;
+    startNonceOverride: bigint;
+    chunkIndexOverride: number;
+  }): string {
+    return JSON.stringify({
+      workerId: wd.workerId,
+      totalWorkers: wd.totalWorkers,
+      laneChunkSize: wd.laneChunkSize,
+      startNonce: "0x" + wd.startNonce.toString(16),
+      header: {
+        parentHash: wd.header.parentHash,
+        number: wd.header.number,
+        timestamp: wd.header.timestamp,
+        difficulty: "0x" + wd.header.difficulty.toString(16),
+        coinbase: wd.header.coinbase,
+        extraData: Buffer.from(wd.header.extraData).toString("hex"),
+        gasLimit: "0x" + wd.header.gasLimit.toString(16),
+        gasUsed: "0x" + wd.header.gasUsed.toString(16),
+        transactionsRoot: wd.header.transactionsRoot,
+        stateRoot: wd.header.stateRoot,
+        nonce: "0x" + wd.header.nonce.toString(16),
+      },
+      budget: wd.budget,
+      chunkYield: wd.chunkYield,
+      reportNonces: wd.reportNonces,
+      exhausted: wd.exhausted,
+      startNonceOverride: "0x" + wd.startNonceOverride.toString(16),
+      chunkIndexOverride: wd.chunkIndexOverride,
+    });
+  }
+
+  // Check shouldStop before spawning any workers.
+  if (options.shouldStop?.() ?? false) {
+    return { status: "stopped", attempts: 0, candidate: null, elapsedSeconds: 0, rate: 0 };
+  }
+  const workerPath = new URL("./genesis-mining-worker.ts", import.meta.url).pathname;
+
+  for (let w = 0; w < cp.workers.length; w++) {
+    const state = workerStates[w];
+    const child = fork(workerPath, [], {
+      execArgv: ["--import", "tsx"],
+      env: {
+        ...process.env,
+        MINING_WORKER_DATA: serializeWorkerData({
+          workerId: w,
+          totalWorkers: cp.workers.length,
+          laneChunkSize: cp.plan.laneChunkSize,
+          startNonce: lanePlan.startNonce,
+          header: options.plan.header,
+          budget: budgetsPerWorker[w],
+          chunkYield,
+          reportNonces,
+          exhausted: state.exhausted,
+          startNonceOverride: state.nextNonce,
+          chunkIndexOverride: state.chunkIndex,
+        }),
+      },
+      serialization: "advanced",
+    });
+    workerThreads.push(child);
+
+    child.on("message", (msg: { type: string; [key: string]: unknown }) => {
+      switch (msg.type) {
+        case "progress":
+          handleProgress(
+            msg.workerId as number,
+            msg.nextNonce as string,
+            msg.attemptedHere as number,
+            msg.chunkIndex as number,
+            msg.exhausted as boolean,
+            reportNonces
+              ? ((msg.probedNonces as string[]).map((h) => BigInt("0x" + h)))
+              : [],
+          );
+          break;
+        case "candidate":
+          handleCandidate(msg.workerId as number, msg.nonce as string).catch((err: Error) => {
+            settleSessionError(err);
+          });
+          break;
+        case "done":
+          handleDone(msg.workerId as number, msg.attempts as number, msg.nextNonce as string, msg.chunkIndex as number, msg.exhausted as boolean);
+          break;
+        case "error":
+          handleError(msg.workerId as number, msg.message as string);
+          break;
+      }
+    });
+
+    child.on("error", (err: Error) => {
+      handleError(w, err.message);
+    });
+
+    child.on("exit", (code: number) => {
+      if (code !== 0 && !sessionSettled && !workerStates[w].done) {
+        handleError(w, `worker exited with code ${code}`);
+      }
+    });
+  }
+
+  // SIGINT handler — signals all workers to stop, then lets them finish
+  // their current batch and persist.
+  let interrupted = false;
+  const onSigInt = () => {
+    if (interrupted) process.exit(130);
+    interrupted = true;
+    process.stdout.write("\nSIGINT received — finishing current batch, saving checkpoint, exiting…\n");
+    stopped = true;
+    for (const w of workerThreads) w.send({ type: "stop" });
+  };
+  process.on("SIGINT", onSigInt);
+
+  // Timer-based shouldStop polling: workers can complete batches faster than
+  // IPC round-trips, so we must check shouldStop independently of progress
+  // messages. Uses setImmediate for the fastest possible polling on the main
+  // thread event loop.
+  let stopPollHandle: NodeJS.Immediate | null = null;
+  let workersStarted = false;
+  const startStopPoll = (): void => {
+    const poll = (): void => {
+      if (sessionSettled) return;
+      // Only start checking shouldStop once workers have begun processing
+      // (signaled by the first progress message). Before that, keep polling
+      // so we don't miss the window.
+      if (!workersStarted) {
+        stopPollHandle = setImmediate(poll);
+        return;
+      }
+      if (options.shouldStop?.() ?? false) {
+        stopped = true;
+        for (const w of workerThreads) w.send({ type: "stop" });
+        settleSession();
+        return;
+      }
+      stopPollHandle = setImmediate(poll);
+    };
+    stopPollHandle = setImmediate(poll);
+  };
+  startStopPoll();
+
+  return sessionPromise;
 }
 
 /** Re-verifies an existing checkpoint candidate through the production
@@ -856,6 +1174,43 @@ export function reverifyRecordedCandidateIfAny(
   return { ok: true, record: record.record };
 }
 
+/** Reconciles an orphaned result artifact: written but not yet recorded in
+    the checkpoint (crash between artifact write and checkpoint persist, F-5).
+    Validates the artifact through the production candidate-verification path.
+    Returns the verified record if valid; throws if invalid, stale, malformed,
+    or inconsistent — never silently accepts or overwrites unrelated files. */
+export function reconcileOrphanResultArtifact(
+  plan: GenesisToolPlan,
+  resultPath: string,
+): { status: "already-found"; record: CandidateRecord } | { status: "none" } {
+  if (!existsSync(resultPath)) return { status: "none" };
+  let raw: string;
+  try {
+    raw = readFileSync(resultPath, "utf8");
+  } catch (err) {
+    throw new Error(`cannot read result artifact ${resultPath}: ${(err as Error).message}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`malformed result artifact at ${resultPath} — refusing to silently accept or overwrite`);
+  }
+  const record = parsed as CandidateRecord;
+  if (typeof record.nonce !== "string") {
+    throw new Error(`orphan result artifact at ${resultPath} has no nonce field`);
+  }
+  const nonce = BigInt(record.nonce);
+  const verdict = verifyGenesisCandidate(plan, nonce, record.totalAttempts, record.foundAtUtc);
+  if (!verdict.ok || !verdict.record) {
+    throw new Error(`orphan result artifact failed production re-verification: ${verdict.reason}`);
+  }
+  if (JSON.stringify(verdict.record) !== JSON.stringify(record)) {
+    throw new Error(`orphan result artifact record differs from production re-derivation (nonce ${record.nonce})`);
+  }
+  return { status: "already-found", record: verdict.record };
+}
+
 /* ------------------------------------------------------------------ */
 /* Shared CLI parsing (imported by scripts/mine-genesis.ts so that the
    safe-exit guarantees run without spawning processes in tests)        */
@@ -873,6 +1228,8 @@ export interface ParsedCli {
     result?: string;
     chunkYield?: number;
     sleepMs?: number;
+    /** Attempts per worker between checkpoints (default 50_000). */
+    checkpointEveryAttempts?: number;
   };
 }
 
@@ -885,6 +1242,7 @@ export interface CliFlags {
   result?: string;
   "chunk-size"?: string;
   "sleep-ms"?: string;
+  "checkpoint-every"?: string;
 }
 
 function parseIntFlag(
@@ -941,6 +1299,15 @@ export function parseCliArguments(flags: CliFlags): ParsedCli {
   if (chunkYield !== null) values.chunkYield = chunkYield;
   const sleepMs = parseIntFlag(flags["sleep-ms"], problems, "sleep-ms", 0, 3_600_000, false);
   if (sleepMs !== null) values.sleepMs = sleepMs;
+  const checkpointEveryAttempts = parseIntFlag(
+    flags["checkpoint-every"],
+    problems,
+    "checkpoint-every",
+    1,
+    2 ** 31,
+    false,
+  );
+  if (checkpointEveryAttempts !== null) values.checkpointEveryAttempts = checkpointEveryAttempts;
 
   if (problems.length !== 0) return { mode: "usage", problems, values };
   if (!values.mine) return { mode: "plan", problems: [], values };
